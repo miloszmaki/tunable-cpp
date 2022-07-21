@@ -50,7 +50,8 @@ public:
 
 template <>
 void tunable_ref<std::string>::from_string(std::string const& s) {
-    *x = s.substr(1, s.size()-2);
+    if (s.size() >= 2 && s[0]=='"' && s.back() == '"') *x = s.substr(1, s.size()-2);
+    else *x = s;
     // todo: parse special chars such as \n
 }
 

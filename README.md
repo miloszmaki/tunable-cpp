@@ -102,7 +102,10 @@ $ f
 $ f=0.123
 $ s=f
 $ s
-.12
+0.123
+$ b=false
+$ b
+false
 $ a="hello world"
 $ s=a
 $ s
@@ -124,12 +127,12 @@ $ v2
 $ v.y=5
 $ out_of_scope
 undefined
-$ 
+$
 --- TUNABLE END ---
 x=100
 f=0.123
 s=hello world
-b=true
+b=false
 v=[-1,5,-1]
 v2=[-1,2,-1]
 ```
