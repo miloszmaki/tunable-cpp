@@ -3,7 +3,7 @@ Simple C++ library for tweaking the variables at runtime
 
 ## Installation
 tunable-cpp is a header-only library, so it's enough to include the downloaded header file:
-```
+```cpp
 #include "tunable.hpp"
 ```
 
@@ -23,7 +23,7 @@ Possible run-time interactions:
 
 ## Example
 
-```
+```cpp
 #include "tunable.hpp"
 
 struct vec3 {
