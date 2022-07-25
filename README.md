@@ -11,8 +11,11 @@ The minimum required C++ standard is C++17.
 
 ## Usage
 
-Use `tunable(x)` to capture variable `x` for tweaking at runtime.
+Use `tunable(x)` to capture variable `x` for tweaking at runtime. This should go right after declaring the variable to represent its scope properly.
+
 For custom types you should overload the stream operators `<<` and `>>`.
+
+Use `tunablem(Class, x)` to capture member variable `Class::x` for all tunable instances of `Class`. This should go within class body or at the global scope.
 
 Call `tunablecmd()` to enter the interactive command line.
 
@@ -21,13 +24,15 @@ Possible run-time interactions:
 - assign a variable with a value or another variable (implicit type casting)
 - create a new variable
 
+There are also special commands, type `;help` in the interactive command line for more information.
+
 ## Example
 
 ```cpp
 #include "tunable.hpp"
 
 struct vec3 {
-    double x,y,z;
+    double x=0, y=0, z=0;
 };
 
 std::ostream& operator<<(std::ostream& stream, const vec3& v) {
@@ -39,10 +44,35 @@ std::istream& operator>>(std::istream& stream, vec3& v) {
     return stream >> v.x >> c >> v.y >> c >> v.z;
 }
 
+struct Triangle {
+    vec3 p[3];
+};
+
+std::ostream& operator<<(std::ostream& stream, const Triangle& v) {
+    return stream << "[" << v.p[0] << "," << v.p[1] << "," << v.p[2] << "]";
+}
+
+std::istream& operator>>(std::istream& stream, Triangle& v) {
+    char c;
+    return stream >> v.p[0] >> c >> v.p[1] >> c >> v.p[2];
+}
+
+tunablem(vec3, x);
+tunablem(vec3, y);
+tunablem(vec3, z);
+
+tunablem(Triangle, p[0]);
+tunablem(Triangle, p[1]);
+tunablem(Triangle, p[2]);
+
 int main()
 {
     int x = 12;
     tunable(x);
+
+    float t[2] = {3.2f, 4.1f};
+    tunable(t[0]);
+    tunable(t[1]);
 
     double f = -245.124;
     tunable(f);
@@ -60,22 +90,24 @@ int main()
 
     vec3 v{1.0,0.4,-0.2};
     tunable(v);
-    tunable(v.x);
-    tunable(v.y);
-    tunable(v.z);
 
     vec3 v2{2,5,3};
     tunable(v2);
+
+    Triangle tri;
+    tunable(tri);
 
     // view and modify tunables in command line
     tunablecmd();
 
     std::cout << "x=" << x << "\n";
+    std::cout << "t=" << "{" << t[0] << ", " << t[1] << "}\n";
     std::cout << "f=" << f << "\n";
     std::cout << "s=" << s << "\n";
     std::cout << "b=" << std::boolalpha << b << "\n";
     std::cout << "v=" << v << "\n";
     std::cout << "v2=" << v2 << "\n";
+    std::cout << "tri=" << tri << "\n";
 
     return 0;
 }
@@ -84,55 +116,61 @@ int main()
 Below you can find possible interactions performed at runtime.
 
 ```
---- TUNABLE BEGIN ---    (CTRL+D to quit)
+--- TUNABLE BEGIN ---
+Special commands:
+      ;q ;quit ;exit - quit tunable command line
+            ;h ;help - show help
+               ;vars - show all variables
+             ;values - show all variables with values
+$ ;values
+b=true
+f=-245.124
+s=test
+t[0]=3.2
+t[1]=4.1
+tri=[[0,0,0],[0,0,0],[0,0,0]]
+v=[1,0.4,-0.2]
+v2=[2,5,3]
+x=12
+$ x=5
 $ x
-12
-$ f
--245.124
-$ s
-test
-$ b
-true
-$ x=100
-$ x
-100
-$ f=x
-$ f
-100
-$ f=0.123
-$ s=f
-$ s
-0.123
-$ b=false
-$ b
-false
-$ a="hello world"
-$ s=a
-$ s
-hello world
-$ v
-[1,0.4,-0.2]
-$ v.x=8
-$ v.z=3
-$ v
-[8,0.4,3]
-$ v=-1,2,-1
-$ v
-[-1,2,-1]
-$ v2
-[2,5,3]
-$ v2=v
-$ v2
-[-1,2,-1]
-$ v.y=5
+5
 $ out_of_scope
 undefined
-$
+$ tri.p[0]=v
+$ tri
+[[1,0.4,-0.2],[0,0,0],[0,0,0]]
+$ tri.p[1].x=0.1
+$ tri.p[1].z=0.3
+$ tri.p[2]=v2
+$ tri
+[[1,0.4,-0.2],[0.1,0,0.3],[2,5,3]]
+$ v.y=-1
+$ b=false
+$ s="hello world"
+$ t[0]=1.7
+$ f=t[1]
+$ N=10
+$ x=N
+$ ;values
+N=10
+b=false
+f=4.1
+s=hello world
+t[0]=1.7
+t[1]=4.1
+tri=[[1,0.4,-0.2],[0.1,0,0.3],[2,5,3]]
+v=[1,-1,-0.2]
+v2=[2,5,3]
+x=10
+$ ;q
 --- TUNABLE END ---
-x=100
-f=0.123
+x=10
+t={1.7, 4.1}
+f=4.1
 s=hello world
 b=false
-v=[-1,5,-1]
-v2=[-1,2,-1]
+v=[1,-1,-0.2]
+v2=[2,5,3]
+tri=[[1,0.4,-0.2],[0.1,0,0.3],[2,5,3]]
 ```
