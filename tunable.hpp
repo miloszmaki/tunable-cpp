@@ -30,13 +30,19 @@ SOFTWARE.
 
 #include <string>
 #include <vector>
+#include <set>
 #include <map>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
 #include <optional>
+#include <memory>
 
 namespace _tunable_impl {
+
+struct tunable_base {
+    virtual ~tunable_base() {}
+};
 
 template <typename T, class = void>
 struct is_out_streamable : std::false_type {};
@@ -51,7 +57,7 @@ struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>> : std::tru
 // holds a reference to a tunable variable
 // allows for conversion to/from string
 template <class T>
-class tunable {
+class tunable : public tunable_base {
 public:
     T& ref;
     tunable(T &var, std::string const& name) : ref(var), name(name) {
@@ -217,6 +223,86 @@ void tunable<T>::remove_from_type(std::string const& name){
     tunable_type<T>::remove_var(name);
 }
 
+
+// interface for tunable class members
+template <class T>
+class member_var_base {
+public:
+    virtual ~member_var_base() {}
+private:
+    virtual void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+                                   T& obj, std::string const& obj_name) = 0;
+
+    template<class U>
+    friend class member_vars;
+};
+
+// allows to register members of an object as tunables
+// holds all tunable members for a given class
+template<class T>
+class member_vars {
+public:
+    static void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+                                  T& obj, std::string const& name) {
+        auto &self = get_instance();
+        for (auto &m : self.members) {
+            m->register_tunables(registered, obj, name);
+        }
+    }
+    static std::vector<std::unique_ptr<_tunable_impl::tunable_base>> register_tunables(T& obj, std::string const& name) {
+        std::vector<std::unique_ptr<_tunable_impl::tunable_base>> registered;
+        register_tunables(registered, obj, name);
+        return registered;
+    }
+private:
+    std::set<member_var_base<T>*> members;
+
+    member_vars() {}
+
+    static member_vars<T>& get_instance() {
+        static member_vars<T> instance;
+        return instance;
+    }
+
+    static void add(member_var_base<T> *var) {
+        auto &self = get_instance();
+        self.members.insert(var);
+    }
+    static void remove(member_var_base<T> *var) {
+        auto &self = get_instance();
+        self.members.erase(var);
+    }
+
+    template<class U, class M>
+    friend class member_var;
+};
+
+// represents a tunable class member
+// allows to register the member of an object as tunable (and its own members recursively)
+template <class T, class M>
+class member_var : member_var_base<T> {
+public:
+    member_var(std::string const& name, M& (*get_ref)(T&)) : name(name), get_ref(get_ref) {
+        member_vars<T>::add(this);
+    }
+    virtual ~member_var() {
+        member_vars<T>::remove(this);
+    }
+private:
+    std::string name;
+    M& (*get_ref)(T&) = nullptr;
+
+    virtual void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+                                   T& obj, std::string const& obj_name) {
+        auto full_name = obj_name + "." + name;
+        auto &this_member = get_ref(obj);
+        // register this member as a tunable
+        registered.emplace_back(new _tunable_impl::tunable<M>(this_member, full_name));
+        // register members recursively
+        member_vars<M>::register_tunables(registered, this_member, full_name);
+    }
+};
+
 // allows to print, assign and create variables
 class tunable_manager {
 public:
@@ -349,15 +435,24 @@ private:
 
 } // namespace _tunable_impl
 
-// #define tunable(x) _tunable_impl::tunable _tunable_for_##x(x, #x)
-// using __COUNTER__ or __LINE__ allows for binding names with special characters (e.g. *v[0]->ptr)
-#define _tunable_(x, n) _tunable_impl::tunable _tunable_for_##n(x, #x)
-#define _tunable(x, n) _tunable_(x, n)
+// using __COUNTER__ or __LINE__ instead of variable name
+// allows for binding names with special characters (e.g. *v[0]->ptr)
 #ifdef __COUNTER__
-#define tunable(x) _tunable(x, __COUNTER__)
+#define _tunable_uniqid __COUNTER__
 #else
-#define tunable(x) _tunable(x, __LINE__)
+#define _tunable_uniqid __LINE__
 #endif
+
+#define _tunable_var_type(x) std::remove_reference<decltype(x)>::type
+
+#define _tunablem_(T,M,x,n) inline static _tunable_impl::member_var<T,M> _tunablem_##n {#x, [](T& t) -> M& { return t.x; } }
+#define _tunablem(T,x,n) _tunablem_(T, _tunable_var_type(T::x), x, n)
+#define tunablem(T,x) _tunablem(T, x, _tunable_uniqid)
+
+#define _tunable_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); \
+    auto _tunable_members_of_##n = _tunable_impl::member_vars<T>::register_tunables(x, #x)
+#define _tunable(x,n) _tunable_(_tunable_var_type(x), x, n)
+#define tunable(x) _tunable(x, _tunable_uniqid)
 
 #define tunablecmd() _tunable_impl::interaction_loop::run()
 
