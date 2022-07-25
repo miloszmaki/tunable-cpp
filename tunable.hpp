@@ -38,95 +38,190 @@ SOFTWARE.
 namespace _tunable_impl {
 
 template <typename T, class = void>
-struct is_out_streamable : std::false_type { };
-
+struct is_out_streamable : std::false_type {};
 template <typename T>
-struct is_out_streamable<T, std::void_t<decltype(std::cout << *(T*)0)>>
-  : std::true_type { };
+struct is_out_streamable<T, std::void_t<decltype(std::cout << *(T*)0)>> : std::true_type {};
 
 template <typename T, class = void>
-struct is_in_streamable : std::false_type { };
-
+struct is_in_streamable : std::false_type {};
 template <typename T>
-struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>>
-  : std::true_type { };
+struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>> : std::true_type {};
 
+// holds a reference to a tunable variable
+// allows for conversion to/from string
 template <class T>
-class tunable_ref {
+class tunable {
 public:
-    T* x = nullptr;
-    tunable_ref() {}
-    tunable_ref(T &x) : x(&x) {}
-
+    T& ref;
+    tunable(T &var, std::string const& name) : ref(var), name(name) {
+        add_to_type(name);
+    }
+    virtual ~tunable() {
+        remove_from_type(name);
+    }
     std::optional<std::string> to_string() const {
-        if (!x) return std::nullopt;
         static_assert(is_out_streamable<T>::value, "Please overload the std::ostream << operator for this type");
         std::stringstream ss;
-        ss << *x;
+        ss << ref;
         return ss.str();
     }
-
     void from_string(std::string const& s) {
-        if (!x) return;
         static_assert(is_in_streamable<T>::value, "Please overload the std::istream >> operator for this type");
         std::stringstream ss(s);
-        ss >> *x;
+        ss >> ref;
     }
-
-    operator bool() const { return x != nullptr; }
+private:
+    std::string name;
+    void add_to_type(std::string const& name);
+    void remove_from_type(std::string const& name);
 };
 
 template <>
-void tunable_ref<std::string>::from_string(std::string const& s) {
-    if (s.size() >= 2 && s[0]=='"' && s.back() == '"') *x = s.substr(1, s.size()-2);
-    else *x = s;
+void tunable<std::string>::from_string(std::string const& s) {
+    if (s.size() >= 2 && s[0]=='"' && s.back() == '"') ref = s.substr(1, s.size()-2);
+    else ref = s;
     // todo: parse special chars such as \n
 }
 
 template <>
-std::optional<std::string> tunable_ref<bool>::to_string() const {
-    if (!x) return std::nullopt;
-    return *x ? "true" : "false";
+std::optional<std::string> tunable<bool>::to_string() const {
+    return ref ? "true" : "false";
 }
 
 template <>
-void tunable_ref<bool>::from_string(std::string const& s) {
-    if (s == "true") *x = true;
-    else if (s == "false") *x = false;
+void tunable<bool>::from_string(std::string const& s) {
+    if (s == "true") ref = true;
+    else if (s == "false") ref = false;
     else {
         std::stringstream ss(s);
-        ss >> *x;
+        ss >> ref;
     }
 }
 
+// interface for variable search and assignment
 class tunable_type_base {
 public:
-    static void interact() {
-        std::cout << "--- TUNABLE BEGIN ---    (CTRL+D to quit)\n";
-        while (true) {
-            std::cout << "$ ";
-            std::string s;
-            std::getline(std::cin, s);
-            if (s == "") break;
-            auto eq = s.find("=");
-            if (eq == std::string::npos) {
-                print_var(s);
-            }
-            else { // x = v
-                auto x = s.substr(0, eq);
-                auto v = s.substr(eq+1);
-                if (!v.empty()) assign_var(x, v);
-            }
-            // todo: more expressions
-        }
-        std::cout << "\n--- TUNABLE END ---\n";
+    virtual ~tunable_type_base() {}
+    virtual std::optional<std::string> find_var_to_string(std::string const &name) const = 0;
+    virtual bool assign_var(std::string const &name, std::string const &value) = 0;
+};
+
+
+// holds a mapping from the variable names to their types
+class tunable_types {
+public:
+    static tunable_type_base* find_type_of_var(std::string const &var_name) {
+        auto &self = get_instance();
+        auto it = self.var_types.find(var_name);
+        if (it == self.var_types.end()) return nullptr;
+        return it->second;
     }
-    virtual std::optional<std::string> find_to_string(std::string const &x) const = 0;
 private:
-    static void print_var(std::string const &x) {
-        auto it = var_types.find(x);
-        if (it != var_types.end()) {
-            auto s = it->second->find_to_string(x);
+    std::map<std::string, tunable_type_base*> var_types;
+
+    tunable_types() {}
+
+    static tunable_types& get_instance() {
+        static tunable_types instance;
+        return instance;
+    }
+
+    static void add_var(std::string const &name, tunable_type_base* type) {
+        auto &self = get_instance();
+        self.var_types[name] = type;
+    }
+    static void remove_var(std::string const &name) {
+        auto &self = get_instance();
+        self.var_types.erase(name);
+    }
+    template <class T>
+    friend class tunable_type;
+};
+
+// implements variable search and assignment
+// holds a mapping from the names to the tunables for all variables of a given type
+template <class T>
+class tunable_type : public tunable_type_base {
+public:
+    virtual std::optional<std::string> find_var_to_string(std::string const &name) const {
+        auto &self = get_instance();
+        auto var = self.find_var(name);
+        if (!var) return std::nullopt;
+        return var->to_string();
+    }
+    virtual bool assign_var(std::string const &name, std::string const &value) {
+        auto &self = get_instance();
+        auto var = self.find_var(name);
+        if (!var) return false;
+        // search for variable of the same type
+        auto var2 = self.find_var(value);
+        if (var2) {
+            var->ref = var2->ref;
+            return true;
+        }
+        // search for other variables
+        auto type2 = tunable_types::find_type_of_var(value);
+        if (type2) {
+            // serialize
+            auto s_var2 = type2->find_var_to_string(value);
+            if (s_var2) {
+                // deserialize
+                var->from_string(*s_var2);
+                return true;
+            }
+        }
+        // parse value
+        var->from_string(value);
+        return true;
+    }
+private:
+    std::map<std::string, tunable<T>*> vars;
+
+    tunable_type() {}
+
+    static tunable_type<T>& get_instance() {
+        static tunable_type<T> instance;
+        return instance;
+    }
+
+    static void add_var(tunable<T> *var, std::string const& name) {
+        auto &self = get_instance();
+        self.vars[name] = var;
+        tunable_types::add_var(name, &self);
+    }
+    static void remove_var(std::string const& name) {
+        auto &self = get_instance();
+        self.vars.erase(name);
+        tunable_types::remove_var(name);
+    }
+    tunable<T>* find_var(std::string const& name) {
+        auto &self = get_instance();
+        auto it = self.vars.find(name);
+        if (it != self.vars.end()) return it->second;
+        return nullptr;
+    }
+
+    template <class U>
+    friend class tunable;
+};
+
+template <class T>
+void tunable<T>::add_to_type(std::string const& name) {
+    tunable_type<T>::add_var(this, name);
+}
+
+template <class T>
+void tunable<T>::remove_from_type(std::string const& name){
+    tunable_type<T>::remove_var(name);
+}
+
+// allows to print, assign and create variables
+class tunable_manager {
+public:
+    static void print_var(std::string const &name) {
+        auto type = tunable_types::find_type_of_var(name);
+        if (type) {
+            auto s = type->find_var_to_string(name);
             if (s) {
                 std::cout << *s << "\n";
                 return;
@@ -134,131 +229,68 @@ private:
         }
         std::cout << "undefined\n";
     }
-    static void assign_var(std::string const &x, std::string const &v) {
-        auto it = var_types.find(x);
-        if (it != var_types.end()) {
-            if (it->second->_assign_var(x, v)) return;
+    static void assign_var(std::string const &name, std::string const &value) {
+        auto type = tunable_types::find_type_of_var(name);
+        if (type) {
+            if (type->assign_var(name, value)) return;
         }
-        create_var(x, v);
+        create_var(name, value);
     }
-    static void create_var(std::string const &name, std::string const &val);
-protected:
-    static inline std::vector<tunable_type_base*> all;
-    static inline std::map<std::string, tunable_type_base*> var_types;
-    virtual bool _assign_var(std::string const &x, std::string const &v) = 0;
-};
-
-template <class T>
-class tunable_type : public tunable_type_base
-{
-public:
-    static void add(T &x, std::string const& s) {
-        create();
-        m[s] = x;
-        var_types[s] = instance;
-    }
-    static void remove(std::string const& s) {
-        m.erase(s);
-        var_types.erase(s);
-    }
-protected:
-    virtual std::optional<std::string> find_to_string(std::string const &x) const {
-        auto v = search(x);
-        if (!v) return std::nullopt;
-        return v.to_string();
-    }
-    virtual bool _assign_var(std::string const &x, std::string const &s) {
-        auto v = search(x);
-        if (!v) return false;
-        // search for variable of the same type
-        auto v2 = search(s);
-        if (v2) {
-            *v.x = *v2.x;
-            return true;
+    static void create_var(std::string const &name, std::string const &value) {
+        if (value.empty()) return;
+        // todo: regex
+        if (value[0] == '"') {
+            auto x = new std::string(value.substr(1, value.size()-2));
+            create_tunable(*x, name);
         }
-        // search for other variables
-        auto it = var_types.find(s);
-        if (it != var_types.end()) {
-            // serialize
-            auto s2 = it->second->find_to_string(s);
-            if (s2) {
-                // deserialize
-                v.from_string(*s2);
-                return true;
+        else try {
+            if (value.find('.') != std::string::npos) {
+                auto x = new double(std::stod(value));
+                create_tunable(*x, name);
+            }
+            else {
+                auto x = new long long(std::stod(value));
+                create_tunable(*x, name);
             }
         }
-        // parse
-        v.from_string(s);
-        return true;
+        catch (std::exception &e) {
+            std::cout << "Exception: parse failed (" << e.what() << ")\n";
+        }
     }
 private:
-    static inline std::map<std::string, tunable_ref<T>> m;
-
-    tunable_type() {}
-    static inline tunable_type<T>* instance = nullptr;
-
-    static void create() {
-        if (instance) return;
-        instance = new tunable_type();
-        all.emplace_back(instance);
-    }
-
-    static tunable_ref<T> search(std::string const& x) {
-        auto it = m.find(x);
-        if (it != m.end()) return it->second;
-        return {};
+    // create a tunable variable of a given type
+    template <class T>
+    static void create_tunable(T &x, std::string const& s) {
+        new tunable<T>(x, s);
     }
 };
 
-template <class T>
-class tunable
-{
-public:
-    tunable (T &x, std::string const& s) : s(s) {
-        tunable_type<T>::add(x, s);
-    }
-    virtual ~tunable() {
-        tunable_type<T>::remove(s);
-    }
-    static void create(T &x, std::string const& s) {
-        all.emplace_back(new tunable<T>(x, s));
-    }
-private:
-    std::string s;
-    static inline std::vector<tunable<T>*> all;
-};
-
-template <class T>
-void create_tunable(T &x, std::string const& s) {
-    tunable<T>::create(x, s);
-}
-
-void tunable_type_base::create_var(std::string const &name, std::string const &val) {
-    if (val.empty()) return;
-    // todo: regex
-    if (val[0] == '"') {
-        auto x = new std::string(val.substr(1, val.size()-2));
-        create_tunable(*x, name);
-    }
-    else try {
-        if (val.find('.') != std::string::npos) {
-            auto x = new double(std::stod(val));
-            create_tunable(*x, name);
+// interaction loop
+void interact() {
+    std::cout << "--- TUNABLE BEGIN ---    (CTRL+D to quit)\n";
+    while (true) {
+        std::cout << "$ ";
+        std::string s;
+        std::getline(std::cin, s);
+        if (s == "") break;
+        auto eq = s.find("=");
+        if (eq == std::string::npos) {
+            tunable_manager::print_var(s);
         }
-        else {
-            auto x = new long long(std::stod(val));
-            create_tunable(*x, name);
+        else { // x = v
+            auto x = s.substr(0, eq);
+            auto v = s.substr(eq+1);
+            if (!v.empty()) tunable_manager::assign_var(x, v);
         }
+        // todo: more expressions
     }
-    catch (std::exception &e) {
-        std::cout << "Exception: parse failed (" << e.what() << ")\n";
-    }
+    std::cout << "\n--- TUNABLE END ---\n";
 }
 
 } // namespace _tunable_impl
 
 // #define tunable(x) _tunable_impl::tunable _tunable_for_##x(x, #x)
-// using __COUNTER__ or __LINE__ allows for binding names with `.`
+// using __COUNTER__ or __LINE__ allows for binding names with special characters (e.g. *v[0]->ptr)
 #define _tunable_(x, n) _tunable_impl::tunable _tunable_for_##n(x, #x)
 #define _tunable(x, n) _tunable_(x, n)
 #ifdef __COUNTER__
@@ -267,6 +299,6 @@ void tunable_type_base::create_var(std::string const &name, std::string const &v
 #define tunable(x) _tunable(x, __LINE__)
 #endif
 
-#define tunablecmd() _tunable_impl::tunable_type_base::interact()
+#define tunablecmd() _tunable_impl::interact()
 
 #endif
