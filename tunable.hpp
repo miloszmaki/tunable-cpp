@@ -40,8 +40,11 @@ SOFTWARE.
 
 namespace _tunable_impl {
 
+// interface for tunable
 struct tunable_base {
     virtual ~tunable_base() {}
+    virtual std::string to_string() const = 0;
+    virtual void from_string(std::string const& s) = 0;
 };
 
 template <typename T, class = void>
@@ -66,13 +69,13 @@ public:
     virtual ~tunable() {
         remove_from_type(name);
     }
-    std::optional<std::string> to_string() const {
+    virtual std::string to_string() const {
         static_assert(is_out_streamable<T>::value, "Please overload the std::ostream << operator for this type");
         std::stringstream ss;
         ss << ref;
         return ss.str();
     }
-    void from_string(std::string const& s) {
+    virtual void from_string(std::string const& s) {
         static_assert(is_in_streamable<T>::value, "Please overload the std::istream >> operator for this type");
         std::stringstream ss(s);
         ss >> ref;
@@ -91,7 +94,7 @@ void tunable<std::string>::from_string(std::string const& s) {
 }
 
 template <>
-std::optional<std::string> tunable<bool>::to_string() const {
+std::string tunable<bool>::to_string() const {
     return ref ? "true" : "false";
 }
 
@@ -109,7 +112,7 @@ void tunable<bool>::from_string(std::string const& s) {
 class tunable_type_base {
 public:
     virtual ~tunable_type_base() {}
-    virtual std::optional<std::string> find_var_to_string(std::string const &name) const = 0;
+    virtual tunable_base* find_var(std::string const &name) const = 0;
     virtual bool assign_var(std::string const &name, std::string const &value) = 0;
 };
 
@@ -151,30 +154,27 @@ private:
 template <class T>
 class tunable_type : public tunable_type_base {
 public:
-    virtual std::optional<std::string> find_var_to_string(std::string const &name) const {
+    virtual tunable_base* find_var(std::string const &name) const {
         auto &self = get_instance();
-        auto var = self.find_var(name);
-        if (!var) return std::nullopt;
-        return var->to_string();
+        return self.find_var_typed(name);
     }
     virtual bool assign_var(std::string const &name, std::string const &value) {
         auto &self = get_instance();
-        auto var = self.find_var(name);
+        auto var = self.find_var_typed(name);
         if (!var) return false;
         // search for variable of the same type
-        auto var2 = self.find_var(value);
+        { auto var2 = self.find_var_typed(value);
         if (var2) {
             var->ref = var2->ref;
             return true;
-        }
+        } }
         // search for other variables
         auto type2 = tunable_types::find_type_of_var(value);
         if (type2) {
-            // serialize
-            auto s_var2 = type2->find_var_to_string(value);
-            if (s_var2) {
-                // deserialize
-                var->from_string(*s_var2);
+            auto var2 = type2->find_var(value);
+            if (var2) {
+                // convert
+                var->from_string(var2->to_string());
                 return true;
             }
         }
@@ -202,7 +202,7 @@ private:
         self.vars.erase(name);
         tunable_types::remove_var(name);
     }
-    tunable<T>* find_var(std::string const& name) {
+    tunable<T>* find_var_typed(std::string const& name) {
         auto &self = get_instance();
         auto it = self.vars.find(name);
         if (it != self.vars.end()) return it->second;
@@ -309,9 +309,9 @@ public:
     static void print_var(std::string const &name) {
         auto type = tunable_types::find_type_of_var(name);
         if (type) {
-            auto s = type->find_var_to_string(name);
-            if (s) {
-                std::cout << *s << "\n";
+            auto var = type->find_var(name);
+            if (var) {
+                std::cout << var->to_string() << "\n";
                 return;
             }
         }
@@ -405,8 +405,8 @@ private:
         }
         if (s == "values") {
             for (auto &[s,v] : tunable_types::get_var_types()) {
-                auto val = v->find_var_to_string(s);
-                if (val) std::cout << s << "=" << *val << "\n";
+                auto var = v->find_var(s);
+                if (var) std::cout << s << "=" << var->to_string() << "\n";
             }
             return cmd_handling_result::processed;
         }
