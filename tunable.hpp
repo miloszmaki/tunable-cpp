@@ -45,6 +45,7 @@ struct tunable_base {
     virtual ~tunable_base() {}
     virtual std::string to_string() const = 0;
     virtual void from_string(std::string const& s) = 0;
+    virtual bool is_class_member() const = 0;
 };
 
 template <typename T, class = void>
@@ -63,7 +64,7 @@ template <class T>
 class tunable : public tunable_base {
 public:
     T& ref;
-    tunable(T &var, std::string const& name) : ref(var), name(name) {
+    tunable(T &var, std::string const& name, bool is_member = false) : ref(var), name(name), is_member(is_member) {
         add_to_type(name);
     }
     virtual ~tunable() {
@@ -80,8 +81,10 @@ public:
         std::stringstream ss(s);
         ss >> ref;
     }
+    virtual bool is_class_member() const { return is_member; }
 private:
     std::string name;
+    bool is_member;
     void add_to_type(std::string const& name);
     void remove_from_type(std::string const& name);
 };
@@ -297,7 +300,7 @@ private:
         auto full_name = obj_name + "." + name;
         auto &this_member = get_ref(obj);
         // register this member as a tunable
-        registered.emplace_back(new _tunable_impl::tunable<M>(this_member, full_name));
+        registered.emplace_back(new _tunable_impl::tunable<M>(this_member, full_name, true));
         // register members recursively
         member_vars<M>::register_tunables(registered, this_member, full_name);
     }
@@ -406,7 +409,8 @@ private:
         if (s == "values") {
             for (auto &[s,v] : tunable_types::get_var_types()) {
                 auto var = v->find_var(s);
-                if (var) std::cout << s << "=" << var->to_string() << "\n";
+                if (var && !var->is_class_member())
+                    std::cout << s << "=" << var->to_string() << "\n";
             }
             return cmd_handling_result::processed;
         }
