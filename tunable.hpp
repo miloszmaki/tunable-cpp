@@ -32,6 +32,7 @@ SOFTWARE.
 #include <vector>
 #include <map>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
 #include <optional>
 
@@ -116,6 +117,7 @@ public:
         if (it == self.var_types.end()) return nullptr;
         return it->second;
     }
+    static auto const& get_var_types() { return get_instance().var_types; }
 private:
     std::map<std::string, tunable_type_base*> var_types;
 
@@ -265,27 +267,85 @@ private:
     }
 };
 
-// interaction loop
-void interact() {
-    std::cout << "--- TUNABLE BEGIN ---    (CTRL+D to quit)\n";
-    while (true) {
-        std::cout << "$ ";
-        std::string s;
-        std::getline(std::cin, s);
-        if (s == "") break;
+class interaction_loop
+{
+public:
+    static void run() {
+        std::cout << "--- TUNABLE BEGIN ---\n";
+        print_help();
+        while (true) {
+            std::cout << "$ ";
+            std::string s;
+            std::getline(std::cin, s);
+            auto result = handle_command(s);
+            if (result == cmd_handling_result::exit) break;
+            else if (result == cmd_handling_result::unrecognized)
+                std::cout << "unrecognized command\n";
+            else if (result == cmd_handling_result::invalid_syntax)
+                std::cout << "invalid syntax\n";
+        }
+        std::cout << "--- TUNABLE END ---\n";
+    }
+private:
+    enum class cmd_handling_result { unrecognized, empty, processed, invalid_syntax, exit };
+
+    static void print_help() {
+        const int col = 20;
+        std::cout << "Special commands:\n" <<
+            std::setw(col) << ";q ;quit ;exit" << " - quit tunable command line\n" <<
+            std::setw(col) << ";h ;help" << " - show help\n" <<
+            std::setw(col) << ";vars" << " - show all variables\n" <<
+            std::setw(col) << ";values" << " - show all variables with values\n";
+    }
+
+    static cmd_handling_result handle_command(std::string const& s) {
+        if (s == "") return cmd_handling_result::empty;
+        if (s[0] == ';') return handle_special_command(s.substr(1));
+        return handle_expression(s);
+    }
+
+    static cmd_handling_result handle_special_command(std::string const& s) {
+        if (s == "q" || s == "quit" || s == "exit")
+            return cmd_handling_result::exit;
+        if (s == "h" || s == "help") {
+            print_help();
+            return cmd_handling_result::processed;
+        }
+        if (s == "vars") {
+            for (auto &[s,_] : tunable_types::get_var_types()) {
+                std::cout << s << "\n";
+            }
+            return cmd_handling_result::processed;
+        }
+        if (s == "values") {
+            for (auto &[s,v] : tunable_types::get_var_types()) {
+                auto val = v->find_var_to_string(s);
+                if (val) std::cout << s << "=" << *val << "\n";
+            }
+            return cmd_handling_result::processed;
+        }
+        return cmd_handling_result::unrecognized;
+    }
+
+    static cmd_handling_result handle_expression(std::string const& s) {
         auto eq = s.find("=");
         if (eq == std::string::npos) {
             tunable_manager::print_var(s);
+            return cmd_handling_result::processed;
         }
         else { // x = v
             auto x = s.substr(0, eq);
             auto v = s.substr(eq+1);
-            if (!v.empty()) tunable_manager::assign_var(x, v);
+            if (!v.empty()) {
+                tunable_manager::assign_var(x, v);
+                return cmd_handling_result::processed;
+            }
+            return cmd_handling_result::invalid_syntax;
         }
         // todo: more expressions
+        return cmd_handling_result::unrecognized;
     }
-    std::cout << "\n--- TUNABLE END ---\n";
-}
+};
 
 } // namespace _tunable_impl
 
@@ -299,6 +359,6 @@ void interact() {
 #define tunable(x) _tunable(x, __LINE__)
 #endif
 
-#define tunablecmd() _tunable_impl::interact()
+#define tunablecmd() _tunable_impl::interaction_loop::run()
 
 #endif
