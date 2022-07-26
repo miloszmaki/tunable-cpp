@@ -226,12 +226,17 @@ void tunable<T>::remove_from_type(std::string const& name){
     tunable_type<T>::remove_var(name);
 }
 
-
-// interface for tunable class members
-template <class T>
+// tunable class member base
 class member_var_base {
 public:
     virtual ~member_var_base() {}
+};
+
+// interface for tunable class members
+template <class T>
+class member_var_base_typed : public member_var_base {
+public:
+    virtual ~member_var_base_typed() {}
 private:
     virtual void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
                                    T& obj, std::string const& obj_name) = 0;
@@ -258,7 +263,7 @@ public:
         return registered;
     }
 private:
-    std::set<member_var_base<T>*> members;
+    std::set<member_var_base_typed<T>*> members;
 
     member_vars() {}
 
@@ -267,11 +272,11 @@ private:
         return instance;
     }
 
-    static void add(member_var_base<T> *var) {
+    static void add(member_var_base_typed<T> *var) {
         auto &self = get_instance();
         self.members.insert(var);
     }
-    static void remove(member_var_base<T> *var) {
+    static void remove(member_var_base_typed<T> *var) {
         auto &self = get_instance();
         self.members.erase(var);
     }
@@ -283,11 +288,8 @@ private:
 // represents a tunable class member
 // allows to register the member of an object as tunable (and its own members recursively)
 template <class T, class M>
-class member_var : member_var_base<T> {
+class member_var : public member_var_base_typed<T> {
 public:
-    member_var(std::string const& name, M& (*get_ref)(T&)) : name(name), get_ref(get_ref) {
-        member_vars<T>::add(this);
-    }
     virtual ~member_var() {
         member_vars<T>::remove(this);
     }
@@ -304,6 +306,23 @@ private:
         // register members recursively
         member_vars<M>::register_tunables(registered, this_member, full_name);
     }
+
+    member_var(std::string const& name, M& (*get_ref)(T&)) : name(name), get_ref(get_ref) {
+        member_vars<T>::add(this);
+    }
+
+    friend class member_var_factory;
+};
+
+// allows to register class member variables as tunables
+class member_var_factory {
+public:
+    template <class T, class M>
+    static void create(std::string const& name, M& (*get_ref)(T&)) {
+        members.emplace_back(new member_var<T,M>(name, get_ref));
+    }
+private:
+    inline static std::vector<member_var_base*> members;
 };
 
 // allows to print, assign and create variables
@@ -449,14 +468,22 @@ private:
 
 #define _tunable_var_type(x) std::remove_reference<decltype(x)>::type
 
-#define _tunablem_(T,M,x,n) inline static _tunable_impl::member_var<T,M> _tunablem_##n {#x, [](T& t) -> M& { return t.x; } }
-#define _tunablem(T,x,n) _tunablem_(T, _tunable_var_type(T::x), x, n)
-#define tunablem(T,x) _tunablem(T, x, _tunable_uniqid)
+#define _tunable_member(T,M,x) _tunable_impl::member_var_factory::create<T,M>(#x, [](T& t) -> M& { return t.x; })
+// tunable_member(Class,x) - register member variable Class::x as tunable
+#define tunable_member(Class,x) _tunable_member(Class, _tunable_var_type(Class::x), x)
 
-#define _tunable_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); \
+#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); \
     auto _tunable_members_of_##n = _tunable_impl::member_vars<T>::register_tunables(x, #x)
-#define _tunable(x,n) _tunable_(_tunable_var_type(x), x, n)
-#define tunable(x) _tunable(x, _tunable_uniqid)
+#define _tunable_var(x,n) _tunable_var_(_tunable_var_type(x), x, n)
+// tunable_var(x) - capture variable x as tunable
+#define tunable_var(x) _tunable_var(x, _tunable_uniqid)
+
+#define _tunable_1(x,...) tunable_var(x)
+#define _tunable_2(x,y) tunable_member(x, y)
+#define _tunable(x,y,n,...) _tunable_##n(x, y)
+// tunable(x) - capture variable x as tunable
+// tunable(Class,x) - register member variable Class::x as tunable
+#define tunable(x,...) _tunable(x, ##__VA_ARGS__, 2, 1)
 
 #define tunablecmd() _tunable_impl::interaction_loop::run()
 
