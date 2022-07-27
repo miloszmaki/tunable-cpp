@@ -238,7 +238,7 @@ class member_var_base_typed : public member_var_base {
 public:
     virtual ~member_var_base_typed() {}
 private:
-    virtual void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+    virtual void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
                                    T& obj, std::string const& obj_name) = 0;
 
     template<class U>
@@ -250,15 +250,15 @@ private:
 template<class T>
 class member_vars {
 public:
-    static void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+    static void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
                                   T& obj, std::string const& name) {
         auto &self = get_instance();
         for (auto &m : self.members) {
             m->register_tunables(registered, obj, name);
         }
     }
-    static std::vector<std::unique_ptr<_tunable_impl::tunable_base>> register_tunables(T& obj, std::string const& name) {
-        std::vector<std::unique_ptr<_tunable_impl::tunable_base>> registered;
+    static std::vector<std::unique_ptr<tunable_base>> register_tunables(T& obj, std::string const& name) {
+        std::vector<std::unique_ptr<tunable_base>> registered;
         register_tunables(registered, obj, name);
         return registered;
     }
@@ -297,12 +297,12 @@ private:
     std::string name;
     M& (*get_ref)(T&) = nullptr;
 
-    virtual void register_tunables(std::vector<std::unique_ptr<_tunable_impl::tunable_base>>& registered,
+    virtual void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
                                    T& obj, std::string const& obj_name) {
         auto full_name = obj_name + "." + name;
         auto &this_member = get_ref(obj);
         // register this member as a tunable
-        registered.emplace_back(new _tunable_impl::tunable<M>(this_member, full_name, true));
+        registered.emplace_back(new tunable<M>(this_member, full_name, true));
         // register members recursively
         member_vars<M>::register_tunables(registered, this_member, full_name);
     }
