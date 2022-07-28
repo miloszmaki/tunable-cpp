@@ -37,16 +37,11 @@ SOFTWARE.
 #include <sstream>
 #include <optional>
 #include <memory>
+#include <regex>
 
 namespace _tunable_impl {
 
-// interface for tunable
-struct tunable_base {
-    virtual ~tunable_base() {}
-    virtual std::string to_string() const = 0;
-    virtual void from_string(std::string const& s) = 0;
-    virtual bool is_class_member() const = 0;
-};
+// helpers
 
 template <typename T, class = void>
 struct is_out_streamable : std::false_type {};
@@ -57,6 +52,22 @@ template <typename T, class = void>
 struct is_in_streamable : std::false_type {};
 template <typename T>
 struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>> : std::true_type {};
+
+bool is_quoted(std::string const& s) {
+    return s.size() >= 2 && s[0]=='"' && s.back() == '"';
+}
+
+bool is_integer(std::string const& s) {
+    return std::regex_match(s, std::regex("[-+]?\\d+"));
+}
+
+// interface for tunable
+struct tunable_base {
+    virtual ~tunable_base() {}
+    virtual std::optional<std::string> to_string() const = 0;
+    virtual bool from_string(std::string const& s) = 0;
+    virtual bool is_class_member() const = 0;
+};
 
 // holds a reference to a tunable variable
 // allows for conversion to/from string
@@ -70,16 +81,27 @@ public:
     virtual ~tunable() {
         remove_from_type(name);
     }
-    virtual std::string to_string() const {
-        static_assert(is_out_streamable<T>::value, "Please overload the std::ostream << operator for this type");
-        std::stringstream ss;
-        ss << ref;
-        return ss.str();
+    virtual std::optional<std::string> to_string() const {
+        if constexpr (is_out_streamable<T>::value) {
+            std::stringstream ss;
+            ss << ref;
+            return ss.str();
+        }
+        else {
+            std::cout << "missing << overload for " << name << " (type=" << typeid(T).name() << ")\n";
+            return std::nullopt;
+        }
     }
-    virtual void from_string(std::string const& s) {
-        static_assert(is_in_streamable<T>::value, "Please overload the std::istream >> operator for this type");
-        std::stringstream ss(s);
-        ss >> ref;
+    virtual bool from_string(std::string const& s) {
+        if constexpr(is_in_streamable<T>::value) {
+            std::stringstream ss(s);
+            ss >> ref;
+            return true;
+        }
+        else {
+            std::cout << "missing >> overload for " << name << " (type=" << typeid(T).name() << ")\n";
+            return false;
+        }
     }
     virtual bool is_class_member() const { return is_member; }
 private:
@@ -90,33 +112,39 @@ private:
 };
 
 template <>
-void tunable<std::string>::from_string(std::string const& s) {
-    if (s.size() >= 2 && s[0]=='"' && s.back() == '"') ref = s.substr(1, s.size()-2);
+bool tunable<std::string>::from_string(std::string const& s) {
+    if (is_quoted(s)) ref = s.substr(1, s.size()-2);
     else ref = s;
     // todo: parse special chars such as \n
+    return true;
 }
 
 template <>
-std::string tunable<bool>::to_string() const {
+std::optional<std::string> tunable<bool>::to_string() const {
     return ref ? "true" : "false";
 }
 
 template <>
-void tunable<bool>::from_string(std::string const& s) {
-    if (s == "true") ref = true;
-    else if (s == "false") ref = false;
-    else {
+bool tunable<bool>::from_string(std::string const& s) {
+    if (is_integer(s)) {
         std::stringstream ss(s);
         ss >> ref;
+        return true;
     }
+    if (s == "true") ref = true;
+    else if (s == "false") ref = false;
+    else return false;
+    return true;
 }
+
+enum class assign_var_result { ok, not_found, bad_value };
 
 // interface for variable search and assignment
 class tunable_type_base {
 public:
     virtual ~tunable_type_base() {}
     virtual tunable_base* find_var(std::string const &name) const = 0;
-    virtual bool assign_var(std::string const &name, std::string const &value) = 0;
+    virtual assign_var_result assign_var(std::string const &name, std::string const &value) = 0;
 };
 
 
@@ -161,15 +189,15 @@ public:
         auto &self = get_instance();
         return self.find_var_typed(name);
     }
-    virtual bool assign_var(std::string const &name, std::string const &value) {
+    virtual assign_var_result assign_var(std::string const &name, std::string const &value) {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
-        if (!var) return false;
+        if (!var) return assign_var_result::not_found;
         // search for variable of the same type
         { auto var2 = self.find_var_typed(value);
         if (var2) {
             var->ref = var2->ref;
-            return true;
+            return assign_var_result::ok;
         } }
         // search for other variables
         auto type2 = tunable_types::find_type_of_var(value);
@@ -177,13 +205,13 @@ public:
             auto var2 = type2->find_var(value);
             if (var2) {
                 // convert
-                var->from_string(var2->to_string());
-                return true;
+                auto var2_s = var2->to_string();
+                if (!var2_s) return assign_var_result::bad_value;
+                return var->from_string(*var2_s) ? assign_var_result::ok : assign_var_result::bad_value;
             }
         }
         // parse value
-        var->from_string(value);
-        return true;
+        return var->from_string(value) ? assign_var_result::ok : assign_var_result::bad_value;
     }
 private:
     std::map<std::string, tunable<T>*> vars;
@@ -329,26 +357,36 @@ private:
 class tunable_manager {
 public:
     static void print_var(std::string const &name) {
+        if (name.empty()) return;
         auto type = tunable_types::find_type_of_var(name);
         if (type) {
             auto var = type->find_var(name);
             if (var) {
-                std::cout << var->to_string() << "\n";
+                auto s = var->to_string();
+                if (s) std::cout << *s << "\n";
                 return;
             }
         }
-        std::cout << "undefined\n";
+        if (isdigit(name[0])) std::cout << name << "\n";
+        else if (is_quoted(name)) std::cout << name.substr(1, name.size()-2) << "\n";
+        else std::cout << "undefined\n";
     }
     static void assign_var(std::string const &name, std::string const &value) {
         auto type = tunable_types::find_type_of_var(name);
         if (type) {
-            if (type->assign_var(name, value)) return;
+            auto r = type->assign_var(name, value);
+            if (r != assign_var_result::ok) std::cout << "failed to assign the variable " << name << "\n";
+            if (r != assign_var_result::not_found) return;
         }
         create_var(name, value);
     }
     static void create_var(std::string const &name, std::string const &value) {
-        if (value.empty()) return;
+        if (name.empty() || value.empty()) return;
         // todo: regex
+        if (isdigit(name[0])) {
+            std::cout << "invalid variable name\n";
+            return;
+        }
         if (value[0] == '"') {
             auto x = new std::string(value.substr(1, value.size()-2));
             create_tunable(*x, name);
@@ -428,8 +466,10 @@ private:
         if (s == "values") {
             for (auto &[s,v] : tunable_types::get_var_types()) {
                 auto var = v->find_var(s);
-                if (var && !var->is_class_member())
-                    std::cout << s << "=" << var->to_string() << "\n";
+                if (var && !var->is_class_member()) {
+                    auto value = var->to_string();
+                    if (value) std::cout << s << "=" << *value << "\n";
+                }
             }
             return cmd_handling_result::processed;
         }
@@ -445,7 +485,7 @@ private:
         else { // x = v
             auto x = s.substr(0, eq);
             auto v = s.substr(eq+1);
-            if (!v.empty()) {
+            if (!x.empty() && !v.empty()) {
                 tunable_manager::assign_var(x, v);
                 return cmd_handling_result::processed;
             }
