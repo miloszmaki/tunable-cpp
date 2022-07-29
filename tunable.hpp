@@ -53,12 +53,33 @@ struct is_in_streamable : std::false_type {};
 template <typename T>
 struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>> : std::true_type {};
 
-bool is_quoted(std::string const& s) {
+inline bool is_quoted(std::string const& s) {
     return s.size() >= 2 && s[0]=='"' && s.back() == '"';
 }
 
-bool is_integer(std::string const& s) {
+inline bool is_integer(std::string const& s) {
     return std::regex_match(s, std::regex("[-+]?\\d+"));
+}
+
+inline bool is_bool(std::string const& s) {
+    return s == "true" || s == "false";
+}
+
+inline bool is_double(std::string const& s) {
+    return std::regex_match(s, std::regex("[-+]?(\\d+\\.\\d*|\\.\\d+)"));
+}
+
+inline bool is_valid_var_name(std::string const& s) {
+    return std::regex_match(s, std::regex("[_a-zA-Z][_a-zA-Z0-9]*"));
+}
+
+std::string parse_quoted_string(std::string s) {
+    s = s.substr(1, s.size()-2);
+    static const std::vector<std::pair<std::string,std::string>> escapes{
+        {"\\\\\\\\", "\\"}, {"\\\\n", "\n"}, {"\\\\t", "\t"}, {"\\\\\"", "\""}, {"\\\\r", "\r"}};
+    for (auto &[c,r] : escapes)
+        s = std::regex_replace(s, std::regex(c), r);
+    return s;
 }
 
 // interface for tunable
@@ -113,9 +134,8 @@ private:
 
 template <>
 bool tunable<std::string>::from_string(std::string const& s) {
-    if (is_quoted(s)) ref = s.substr(1, s.size()-2);
+    if (is_quoted(s)) ref = parse_quoted_string(s);
     else ref = s;
-    // todo: parse special chars such as \n
     return true;
 }
 
@@ -382,23 +402,29 @@ public:
     }
     static void create_var(std::string const &name, std::string const &value) {
         if (name.empty() || value.empty()) return;
-        // todo: regex
-        if (isdigit(name[0])) {
+        if (!is_valid_var_name(name)) {
             std::cout << "invalid variable name\n";
             return;
         }
-        if (value[0] == '"') {
-            auto x = new std::string(value.substr(1, value.size()-2));
-            create_tunable(*x, name);
-        }
-        else try {
-            if (value.find('.') != std::string::npos) {
+        try {
+            if (is_quoted(value)) {
+                auto x = new std::string(parse_quoted_string(value));
+                create_tunable(*x, name);
+            }
+            else if (is_double(value)) {
                 auto x = new double(std::stod(value));
                 create_tunable(*x, name);
             }
-            else {
+            else if (is_integer(value)) {
                 auto x = new long long(std::stod(value));
                 create_tunable(*x, name);
+            }
+            else if (is_bool(value)) {
+                auto x = new bool(value == "true");
+                create_tunable(*x, name);
+            }
+            else {
+                std::cout << "invalid value\n";
             }
         }
         catch (std::exception &e) {
