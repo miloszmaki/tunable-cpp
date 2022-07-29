@@ -547,7 +547,7 @@ private:
 
     static cmd_handling_result handle_expression(std::string const& s) {
         if (s.empty()) return cmd_handling_result::processed;
-        auto eq = s.find("=");
+        auto eq = find_not_quoted(s, '=');
         if (eq == std::string::npos) {
             tunable_manager::print_var(s);
             return cmd_handling_result::processed;
@@ -555,6 +555,9 @@ private:
         else { // x = v
             auto x = s.substr(0, eq);
             auto v = s.substr(eq+1);
+            if (find_not_quoted(v, '=') != std::string::npos) {
+                return cmd_handling_result::invalid_syntax;
+            }
             if (!x.empty() && !v.empty()) {
                 tunable_manager::assign_var(x, v);
                 return cmd_handling_result::processed;
