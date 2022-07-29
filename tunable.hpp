@@ -73,13 +73,47 @@ inline bool is_valid_var_name(std::string const& s) {
     return std::regex_match(s, std::regex("[_a-zA-Z][_a-zA-Z0-9]*"));
 }
 
-std::string parse_quoted_string(std::string s) {
+inline std::string parse_quoted_string(std::string s) {
     s = s.substr(1, s.size()-2);
     static const std::vector<std::pair<std::string,std::string>> escapes{
         {"\\\\\\\\", "\\"}, {"\\\\n", "\n"}, {"\\\\t", "\t"}, {"\\\\\"", "\""}, {"\\\\r", "\r"}};
     for (auto &[c,r] : escapes)
         s = std::regex_replace(s, std::regex(c), r);
     return s;
+}
+
+// find first position of c in s (but not within "..."), starting at pos
+// use quoted=true to search only within "..."
+inline size_t find_not_quoted(std::string const& s, char c, size_t pos = 0, bool quoted = false) {
+    for (; pos < s.size(); pos++) {
+        if (s[pos] == '"' && (pos == 0 || s[pos-1] != '\\')) quoted = !quoted;
+        else if (s[pos] == c && !quoted) return pos;
+    }
+    return std::string::npos;
+}
+
+// split s with delimiter
+inline std::vector<std::string> split(std::string const& s, char delimiter) {
+    size_t last = 0, next = 0;
+    std::vector<std::string> parts;
+    while ((next = s.find(delimiter, last)) != std::string::npos) {
+        parts.emplace_back(s.substr(last, next-last));
+        last = next + 1;
+    }
+    parts.emplace_back(s.substr(last));
+    return parts;
+}
+
+// split s by delimiter (which is not within "...")
+inline std::vector<std::string> split_not_quoted(std::string const& s, char delimiter) {
+    size_t last = 0, next = 0;
+    std::vector<std::string> parts;
+    while ((next = find_not_quoted(s, delimiter, last)) != std::string::npos) {
+        parts.emplace_back(s.substr(last, next-last));
+        last = next + 1;
+    }
+    parts.emplace_back(s.substr(last));
+    return parts;
 }
 
 // interface for tunable
@@ -503,18 +537,12 @@ private:
     }
 
     static cmd_handling_result handle_expressions(std::string const& s) {
-        // split expressions by ; (if it's not within "...")
-        bool quoted = false;
-        size_t last = 0;
-        for (size_t next = 0; next < s.size(); next++) {
-            if (s[next] == '"' && (next == 0 || s[next-1] != '\\')) quoted = !quoted;
-            else if (s[next] == ';' && !quoted) {
-                auto r = handle_expression(s.substr(last, next-last));
-                if (r != cmd_handling_result::processed) return r;
-                last = next + 1;
-            }
+        auto expressions = split_not_quoted(s, ';');
+        for (auto &expr : expressions) {
+            auto r = handle_expression(expr);
+            if (r != cmd_handling_result::processed) return r;
         }
-        return handle_expression(s.substr(last));
+        return cmd_handling_result::processed;
     }
 
     static cmd_handling_result handle_expression(std::string const& s) {
