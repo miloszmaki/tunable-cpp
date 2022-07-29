@@ -473,7 +473,7 @@ private:
     static cmd_handling_result handle_command(std::string const& s) {
         if (s == "") return cmd_handling_result::empty;
         if (s[0] == ';') return handle_special_command(s.substr(1));
-        return handle_expression(s);
+        return handle_expressions(s);
     }
 
     static cmd_handling_result handle_special_command(std::string const& s) {
@@ -502,7 +502,23 @@ private:
         return cmd_handling_result::unrecognized;
     }
 
+    static cmd_handling_result handle_expressions(std::string const& s) {
+        // split expressions by ; (if it's not within "...")
+        bool quoted = false;
+        size_t last = 0;
+        for (size_t next = 0; next < s.size(); next++) {
+            if (s[next] == '"' && (next == 0 || s[next-1] != '\\')) quoted = !quoted;
+            else if (s[next] == ';' && !quoted) {
+                auto r = handle_expression(s.substr(last, next-last));
+                if (r != cmd_handling_result::processed) return r;
+                last = next + 1;
+            }
+        }
+        return handle_expression(s.substr(last));
+    }
+
     static cmd_handling_result handle_expression(std::string const& s) {
+        if (s.empty()) return cmd_handling_result::processed;
         auto eq = s.find("=");
         if (eq == std::string::npos) {
             tunable_manager::print_var(s);
