@@ -117,7 +117,7 @@ inline std::vector<std::string> split_not_quoted(std::string const& s, char deli
     return parts;
 }
 
-enum class assign_var_result { ok, var_not_found, bad_value };
+enum class assign_var_result { ok, var_not_found, bad_value, invalid_syntax, idx_out_of_bounds };
 
 template<class T>
 assign_var_result var_from_string(T& ref, std::string const& var_suffix, std::string const& value);
@@ -136,7 +136,7 @@ var_to_string_result var_to_string(T const& ref, std::string const& var_suffix);
 template <class T>
 std::optional<T> process_var_name_prefixes(std::string const& name, std::function<std::optional<T>(std::string const&,std::string const&)> func) {
     for (size_t i=0; i<name.size(); i++) {
-        if (name[i] == '.') {
+        if (name[i] == '.' || name[i] == '[' || name[i] == ']') { // todo: handle nested brackets properly
             auto prefix = name.substr(0, i);
             auto suffix = name.substr(i);
             auto ret = func(prefix, suffix);
@@ -163,6 +163,14 @@ template <>
 bool from_string(std::string& ref, std::string const& s) {
     if (is_quoted(s)) ref = parse_quoted_string(s);
     else ref = s;
+    return true;
+}
+
+template <>
+bool from_string(size_t& ref, std::string const& s) {
+    if (!is_integer(s)) return false;
+    std::stringstream ss(s);
+    ss >> ref;
     return true;
 }
 
@@ -413,6 +421,61 @@ var_to_string_result evaluate_expression(std::string const& expr) {
     return { .str = expr };
 }
 
+int find_closing_bracket(std::string const& s, char close_bracket, int i = 0) {
+    char open_bracket = s[i++];
+    for (int o=1; i<(int)s.size(); i++) {
+        if (s[i] == open_bracket) ++o;
+        else if (s[i] == close_bracket) {
+            if (--o == 0) break;
+            if (o < 0) return -1;
+        }
+    }
+    if (i == (int)s.size()) return -1;
+    return i;
+}
+
+template<class T>
+assign_var_result container_var_from_string(T& ref, std::string const& var_suffix, std::string const& value) {
+    return assign_var_result::var_not_found;
+}
+
+template<class T>
+var_to_string_result container_var_to_string(T const& ref, std::string const& var_suffix) {
+    return {};
+}
+
+template<class T>
+assign_var_result container_var_from_string(std::vector<T>& ref, std::string const& var_suffix, std::string const& value) {
+    if (var_suffix[0] == '[') {
+        int i = find_closing_bracket(var_suffix, ']');
+        if (i <= 1) return assign_var_result::invalid_syntax;
+        auto idx_eval = evaluate_expression(var_suffix.substr(1, i-1));
+        if (!idx_eval.str) return assign_var_result::invalid_syntax;
+        size_t idx = -1;
+        if (!from_string(idx, *idx_eval.str)) return assign_var_result::invalid_syntax;
+        if (idx >= ref.size()) return assign_var_result::idx_out_of_bounds;
+        return var_from_string(ref[idx], var_suffix.substr(i+1), value);
+    }
+    // todo: front(), back(), etc.
+    return assign_var_result::invalid_syntax;
+}
+
+template<class T>
+var_to_string_result container_var_to_string(std::vector<T> const& ref, std::string const& var_suffix) {
+    if (var_suffix[0] == '[') {
+        int i = find_closing_bracket(var_suffix, ']');
+        if (i <= 1) return {};
+        auto idx_eval = evaluate_expression(var_suffix.substr(1, i-1));
+        if (!idx_eval.str) return {};
+        size_t idx = -1;
+        if (!from_string(idx, *idx_eval.str)) return {};
+        if (idx >= ref.size()) return {};
+        return var_to_string(ref[idx], var_suffix.substr(i+1));
+    }
+    // todo: front(), back(), etc.
+    return {};
+}
+
 template<class T>
 assign_var_result var_from_string(T& ref, std::string const& var_suffix, std::string const& value) {
     if (var_suffix.empty()) {
@@ -426,7 +489,10 @@ assign_var_result var_from_string(T& ref, std::string const& var_suffix, std::st
         if (eval.str && from_string(ref, *eval.str)) return assign_var_result::ok;
         return assign_var_result::bad_value;
     }
-    // todo: specialization for [] -> etc.
+    {
+        auto ret = container_var_from_string(ref, var_suffix, value);
+        if (ret != assign_var_result::var_not_found) return ret;
+    }
     if (var_suffix[0] == '.') {
         auto ret = process_var_name_prefixes(var_suffix.substr(1),
             std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<assign_var_result> {
@@ -448,7 +514,10 @@ var_to_string_result var_to_string(T const& ref, std::string const& var_suffix) 
     if (var_suffix.empty()) {
         return {true, to_string(ref), (void const*)&ref, typeid(ref) };
     }
-    // todo: specialization for [] -> etc.
+    {
+        auto ret = container_var_to_string(ref, var_suffix);
+        if (ret.found) return ret;
+    }
     if (var_suffix[0] == '.') {
         auto ret = process_var_name_prefixes(var_suffix.substr(1),
             std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_to_string_result> {
@@ -489,7 +558,16 @@ public:
             })
         );
         if (ret) {
-            if (*ret != assign_var_result::ok) std::cout << "failed to assign the variable " << name << "\n";
+            if (*ret != assign_var_result::ok) {
+                static const std::map<assign_var_result, std::string> errors{
+                    {assign_var_result::var_not_found, "not found"},
+                    {assign_var_result::bad_value, "bad value"},
+                    {assign_var_result::invalid_syntax, "invalid syntax"},
+                    {assign_var_result::idx_out_of_bounds, "index out of bounds"}
+                };
+                std::cout << "failed to assign the variable " << name <<
+                    ": " << errors.at(*ret) << "\n";
+            }
             if (*ret != assign_var_result::var_not_found) return;
         }
         create_var(name, value);
@@ -501,6 +579,7 @@ public:
             return;
         }
         try {
+            // todo: evaluate_expression instead?
             if (is_quoted(value)) {
                 auto x = new std::string(parse_quoted_string(value));
                 create_tunable(*x, name);
