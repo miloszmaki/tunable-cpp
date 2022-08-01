@@ -38,6 +38,7 @@ SOFTWARE.
 #include <optional>
 #include <memory>
 #include <regex>
+#include <typeindex>
 
 namespace _tunable_impl {
 
@@ -116,70 +117,57 @@ inline std::vector<std::string> split_not_quoted(std::string const& s, char deli
     return parts;
 }
 
-// interface for tunable
-struct tunable_base {
-    virtual ~tunable_base() {}
-    virtual std::optional<std::string> to_string() const = 0;
-    virtual bool from_string(std::string const& s) = 0;
-    virtual bool is_class_member() const = 0;
-};
+enum class assign_var_result { ok, var_not_found, bad_value };
 
-// holds a reference to a tunable variable
-// allows for conversion to/from string
-template <class T>
-class tunable : public tunable_base {
-public:
-    T& ref;
-    tunable(T &var, std::string const& name, bool is_member = false) : ref(var), name(name), is_member(is_member) {
-        add_to_type(name);
-    }
-    virtual ~tunable() {
-        remove_from_type(name);
-    }
-    virtual std::optional<std::string> to_string() const {
-        if constexpr (is_out_streamable<T>::value) {
-            std::stringstream ss;
-            ss << ref;
-            return ss.str();
-        }
-        else {
-            std::cout << "missing << overload for " << name << " (type=" << typeid(T).name() << ")\n";
-            return std::nullopt;
-        }
-    }
-    virtual bool from_string(std::string const& s) {
-        if constexpr(is_in_streamable<T>::value) {
-            std::stringstream ss(s);
-            ss >> ref;
-            return true;
-        }
-        else {
-            std::cout << "missing >> overload for " << name << " (type=" << typeid(T).name() << ")\n";
-            return false;
-        }
-    }
-    virtual bool is_class_member() const { return is_member; }
-private:
-    std::string name;
-    bool is_member;
-    void add_to_type(std::string const& name);
-    void remove_from_type(std::string const& name);
+template<class T>
+assign_var_result var_from_string(T& ref, std::string const& var_suffix, std::string const& value);
+
+struct var_to_string_result {
+    bool found = false;
+    std::optional<std::string> str;
+    void const* var_ptr = nullptr;
+    std::optional<std::type_index> var_type;
 };
+template<class T>
+var_to_string_result var_to_string(T const& ref, std::string const& var_suffix);
+
+// process prefix parts of name split by .
+// todo: support [] -> etc.
+template <class T>
+std::optional<T> process_var_name_prefixes(std::string const& name, std::function<std::optional<T>(std::string const&,std::string const&)> func) {
+    for (size_t i=0; i<name.size(); i++) {
+        if (name[i] == '.') {
+            auto prefix = name.substr(0, i);
+            auto suffix = name.substr(i);
+            auto ret = func(prefix, suffix);
+            if (ret.has_value()) return ret;
+        }
+    }
+    return func(name, "");
+}
+
+template<class T>
+bool from_string(T& ref, std::string const& s) {
+    if constexpr(is_in_streamable<T>::value) {
+        std::stringstream ss(s);
+        ss >> ref;
+        return true;
+    }
+    else {
+        std::cout << "missing >> overload for type " << typeid(T).name() << "\n";
+        return false;
+    }
+}
 
 template <>
-bool tunable<std::string>::from_string(std::string const& s) {
+bool from_string(std::string& ref, std::string const& s) {
     if (is_quoted(s)) ref = parse_quoted_string(s);
     else ref = s;
     return true;
 }
 
 template <>
-std::optional<std::string> tunable<bool>::to_string() const {
-    return ref ? "true" : "false";
-}
-
-template <>
-bool tunable<bool>::from_string(std::string const& s) {
+bool from_string(bool& ref, std::string const& s) {
     if (is_integer(s)) {
         std::stringstream ss(s);
         ss >> ref;
@@ -191,14 +179,47 @@ bool tunable<bool>::from_string(std::string const& s) {
     return true;
 }
 
-enum class assign_var_result { ok, not_found, bad_value };
+template <class T>
+std::optional<std::string> to_string(T const& ref) {
+    if constexpr (is_out_streamable<T>::value) {
+        std::stringstream ss;
+        ss << ref;
+        return ss.str();
+    }
+    else {
+        std::cout << "missing << overload for type " << typeid(T).name() << "\n";
+        return std::nullopt;
+    }
+}
+
+template <>
+std::optional<std::string> to_string(bool const& ref) {
+    return ref ? "true" : "false";
+}
+
+// holds a reference to a tunable variable
+template <class T>
+class tunable {
+public:
+    T& ref;
+    tunable(T &var, std::string const& name, bool is_member = false) : ref(var), name(name) {
+        add_to_type(name);
+    }
+    virtual ~tunable() {
+        remove_from_type(name);
+    }
+private:
+    std::string name;
+    void add_to_type(std::string const& name);
+    void remove_from_type(std::string const& name);
+};
 
 // interface for variable search and assignment
 class tunable_type_base {
 public:
     virtual ~tunable_type_base() {}
-    virtual tunable_base* find_var(std::string const &name) const = 0;
-    virtual assign_var_result assign_var(std::string const &name, std::string const &value) = 0;
+    virtual var_to_string_result find_var_to_string(std::string const& name, std::string const& suffix) const = 0;
+    virtual assign_var_result assign_var(std::string const& name, std::string const& suffix, std::string const& value) = 0;
 };
 
 
@@ -239,33 +260,17 @@ private:
 template <class T>
 class tunable_type : public tunable_type_base {
 public:
-    virtual tunable_base* find_var(std::string const &name) const {
-        auto &self = get_instance();
-        return self.find_var_typed(name);
-    }
-    virtual assign_var_result assign_var(std::string const &name, std::string const &value) {
+    virtual var_to_string_result find_var_to_string(std::string const& name, std::string const& suffix) const {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
-        if (!var) return assign_var_result::not_found;
-        // search for variable of the same type
-        { auto var2 = self.find_var_typed(value);
-        if (var2) {
-            var->ref = var2->ref;
-            return assign_var_result::ok;
-        } }
-        // search for other variables
-        auto type2 = tunable_types::find_type_of_var(value);
-        if (type2) {
-            auto var2 = type2->find_var(value);
-            if (var2) {
-                // convert
-                auto var2_s = var2->to_string();
-                if (!var2_s) return assign_var_result::bad_value;
-                return var->from_string(*var2_s) ? assign_var_result::ok : assign_var_result::bad_value;
-            }
-        }
-        // parse value
-        return var->from_string(value) ? assign_var_result::ok : assign_var_result::bad_value;
+        if (!var) return {};
+        return var_to_string(var->ref, suffix);
+    }
+    virtual assign_var_result assign_var(std::string const& name, std::string const& suffix, std::string const& value) {
+        auto &self = get_instance();
+        auto var = self.find_var_typed(name);
+        if (!var) return assign_var_result::var_not_found;
+        return var_from_string(var->ref, suffix, value);
     }
 private:
     std::map<std::string, tunable<T>*> vars;
@@ -319,33 +324,22 @@ template <class T>
 class member_var_base_typed : public member_var_base {
 public:
     virtual ~member_var_base_typed() {}
-private:
-    virtual void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
-                                   T& obj, std::string const& obj_name) = 0;
-
-    template<class U>
-    friend class member_vars;
+    virtual var_to_string_result to_string(T const& ref, std::string const& var_suffix) const = 0;
+    virtual assign_var_result from_string(T& ref, std::string const& var_suffix, std::string const& value) = 0;
 };
 
-// allows to register members of an object as tunables
 // holds all tunable members for a given class
 template<class T>
 class member_vars {
 public:
-    static void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
-                                  T& obj, std::string const& name) {
+    static member_var_base_typed<T>* find_member(std::string const& name) {
         auto &self = get_instance();
-        for (auto &m : self.members) {
-            m->register_tunables(registered, obj, name);
-        }
-    }
-    static std::vector<std::unique_ptr<tunable_base>> register_tunables(T& obj, std::string const& name) {
-        std::vector<std::unique_ptr<tunable_base>> registered;
-        register_tunables(registered, obj, name);
-        return registered;
+        auto it = self.members.find(name);
+        if (it == self.members.end()) return nullptr;
+        return it->second;
     }
 private:
-    std::set<member_var_base_typed<T>*> members;
+    std::map<std::string, member_var_base_typed<T>*> members;
 
     member_vars() {}
 
@@ -354,13 +348,13 @@ private:
         return instance;
     }
 
-    static void add(member_var_base_typed<T> *var) {
+    static void add(member_var_base_typed<T> *var, std::string const& name) {
         auto &self = get_instance();
-        self.members.insert(var);
+        self.members[name] = var;
     }
-    static void remove(member_var_base_typed<T> *var) {
+    static void remove(std::string const& name) {
         auto &self = get_instance();
-        self.members.erase(var);
+        self.members.erase(name);
     }
 
     template<class U, class M>
@@ -368,29 +362,28 @@ private:
 };
 
 // represents a tunable class member
-// allows to register the member of an object as tunable (and its own members recursively)
 template <class T, class M>
 class member_var : public member_var_base_typed<T> {
 public:
     virtual ~member_var() {
-        member_vars<T>::remove(this);
+        member_vars<T>::remove(name);
+    }
+    var_to_string_result to_string(T const& ref, std::string const& var_suffix) const {
+        auto& member_ref = get_cref(ref);
+        return var_to_string(member_ref, var_suffix);
+    }
+    virtual assign_var_result from_string(T& ref, std::string const& var_suffix, std::string const& value) {
+        auto& member_ref = get_ref(ref);
+        return var_from_string(member_ref, var_suffix, value);
     }
 private:
     std::string name;
     M& (*get_ref)(T&) = nullptr;
+    M const& (*get_cref)(T const&) = nullptr;
 
-    virtual void register_tunables(std::vector<std::unique_ptr<tunable_base>>& registered,
-                                   T& obj, std::string const& obj_name) {
-        auto full_name = obj_name + "." + name;
-        auto &this_member = get_ref(obj);
-        // register this member as a tunable
-        registered.emplace_back(new tunable<M>(this_member, full_name, true));
-        // register members recursively
-        member_vars<M>::register_tunables(registered, this_member, full_name);
-    }
-
-    member_var(std::string const& name, M& (*get_ref)(T&)) : name(name), get_ref(get_ref) {
-        member_vars<T>::add(this);
+    member_var(std::string const& name, M& (*get_ref)(T&), M const& (*get_cref)(T const&))
+            : name(name), get_ref(get_ref), get_cref(get_cref) {
+        member_vars<T>::add(this, name);
     }
 
     friend class member_var_factory;
@@ -400,37 +393,104 @@ private:
 class member_var_factory {
 public:
     template <class T, class M>
-    static void create(std::string const& name, M& (*get_ref)(T&)) {
-        members.emplace_back(new member_var<T,M>(name, get_ref));
+    static void create(std::string const& name, M& (*get_ref)(T&), M const& (*get_cref)(T const&)) {
+        members.emplace_back(new member_var<T,M>(name, get_ref, get_cref));
     }
 private:
     inline static std::vector<member_var_base*> members;
 };
 
+var_to_string_result evaluate_expression(std::string const& expr) {
+    if (expr.empty()) return {};
+    auto ret = process_var_name_prefixes(expr,
+        std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_to_string_result> {
+            auto type = tunable_types::find_type_of_var(prefix);
+            if (!type) return {};
+            return type->find_var_to_string(prefix, suffix);
+        })
+    );
+    if (ret) return *ret;
+    return { .str = expr };
+}
+
+template<class T>
+assign_var_result var_from_string(T& ref, std::string const& var_suffix, std::string const& value) {
+    if (var_suffix.empty()) {
+        auto eval = evaluate_expression(value);
+        if (eval.var_ptr && *eval.var_type == std::type_index(typeid(ref))) {
+            // if types match assign directly
+            ref = *(T const*)eval.var_ptr;
+            return assign_var_result::ok;
+        }
+        // deserialize
+        if (eval.str && from_string(ref, *eval.str)) return assign_var_result::ok;
+        return assign_var_result::bad_value;
+    }
+    // todo: specialization for [] -> etc.
+    if (var_suffix[0] == '.') {
+        auto ret = process_var_name_prefixes(var_suffix.substr(1),
+            std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<assign_var_result> {
+                auto var = member_vars<T>::find_member(prefix);
+                if (!var) return std::nullopt;
+                auto ret = var->from_string(ref, suffix, value);
+                if (ret != assign_var_result::var_not_found) return ret;
+                return std::nullopt;
+            })
+        );
+        if (ret) return *ret;
+        return assign_var_result::var_not_found;
+    }
+    return assign_var_result::var_not_found;
+}
+
+template<class T>
+var_to_string_result var_to_string(T const& ref, std::string const& var_suffix) {
+    if (var_suffix.empty()) {
+        return {true, to_string(ref), (void const*)&ref, typeid(ref) };
+    }
+    // todo: specialization for [] -> etc.
+    if (var_suffix[0] == '.') {
+        auto ret = process_var_name_prefixes(var_suffix.substr(1),
+            std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_to_string_result> {
+                auto var = member_vars<T>::find_member(prefix);
+                if (!var) return std::nullopt;
+                auto ret = var->to_string(ref, suffix);
+                if (ret.found) return ret;
+                return std::nullopt;
+            })
+        );
+        if (ret) return *ret;
+        return {};
+    }
+    return {};
+}
+
 // allows to print, assign and create variables
 class tunable_manager {
 public:
     static void print_var(std::string const &name) {
-        if (name.empty()) return;
-        auto type = tunable_types::find_type_of_var(name);
-        if (type) {
-            auto var = type->find_var(name);
-            if (var) {
-                auto s = var->to_string();
-                if (s) std::cout << *s << "\n";
+        auto eval = evaluate_expression(name);
+        if (eval.str) {
+            auto s = *eval.str;
+            if (eval.found || is_quoted(s) || is_integer(s) || is_double(s) || is_bool(s)) {
+                std::cout << s << "\n";
                 return;
             }
         }
-        if (isdigit(name[0])) std::cout << name << "\n";
-        else if (is_quoted(name)) std::cout << name.substr(1, name.size()-2) << "\n";
-        else std::cout << "undefined\n";
+        if (is_valid_var_name(name)) std::cout << "undefined\n";
+        else std::cout << "invalid expression\n";
     }
     static void assign_var(std::string const &name, std::string const &value) {
-        auto type = tunable_types::find_type_of_var(name);
-        if (type) {
-            auto r = type->assign_var(name, value);
-            if (r != assign_var_result::ok) std::cout << "failed to assign the variable " << name << "\n";
-            if (r != assign_var_result::not_found) return;
+        auto ret = process_var_name_prefixes(name,
+            std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<assign_var_result> {
+                auto type = tunable_types::find_type_of_var(prefix);
+                if (!type) return std::nullopt;
+                return type->assign_var(prefix, suffix, value);
+            })
+        );
+        if (ret) {
+            if (*ret != assign_var_result::ok) std::cout << "failed to assign the variable " << name << "\n";
+            if (*ret != assign_var_result::var_not_found) return;
         }
         create_var(name, value);
     }
@@ -524,12 +584,9 @@ private:
             return cmd_handling_result::processed;
         }
         if (s == "values") {
-            for (auto &[s,v] : tunable_types::get_var_types()) {
-                auto var = v->find_var(s);
-                if (var && !var->is_class_member()) {
-                    auto value = var->to_string();
-                    if (value) std::cout << s << "=" << *value << "\n";
-                }
+            for (auto &[s,_] : tunable_types::get_var_types()) {
+                auto value = evaluate_expression(s);
+                if (value.str) std::cout << s << "=" << *value.str << "\n";
             }
             return cmd_handling_result::processed;
         }
@@ -581,12 +638,12 @@ private:
 
 #define _tunable_var_type(x) std::remove_reference<decltype(x)>::type
 
-#define _tunable_member(T,M,x) _tunable_impl::member_var_factory::create<T,M>(#x, [](T& t) -> M& { return t.x; })
+#define _tunable_member(T,M,x) _tunable_impl::member_var_factory::create<T,M>(#x, \
+    [](T& t) -> M& { return t.x; }, [](T const& t) -> M const& { return t.x; })
 // tunable_member(Class,x) - register member variable Class::x as tunable
 #define tunable_member(Class,x) _tunable_member(Class, _tunable_var_type(Class::x), x)
 
-#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); \
-    auto _tunable_members_of_##n = _tunable_impl::member_vars<T>::register_tunables(x, #x)
+#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x)
 #define _tunable_var(x,n) _tunable_var_(_tunable_var_type(x), x, n)
 // tunable_var(x) - capture variable x as tunable
 #define tunable_var(x) _tunable_var(x, _tunable_uniqid)
