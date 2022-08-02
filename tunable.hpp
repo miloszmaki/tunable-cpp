@@ -421,17 +421,25 @@ var_to_string_result evaluate_expression(std::string const& expr) {
     return { .str = expr };
 }
 
-int find_closing_bracket(std::string const& s, char close_bracket, int i = 0) {
+size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
+    if (i >= s.size()) return std::string::npos;
     char open_bracket = s[i++];
-    for (int o=1; i<(int)s.size(); i++) {
+    for (size_t o=1; i<s.size(); i++) {
         if (s[i] == open_bracket) ++o;
         else if (s[i] == close_bracket) {
+            if (o == 0) return std::string::npos;
             if (--o == 0) break;
-            if (o < 0) return -1;
         }
     }
-    if (i == (int)s.size()) return -1;
+    if (i == s.size()) return std::string::npos;
     return i;
+}
+
+std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket, char close_bracket, size_t i = 0) {
+    auto r = std::make_pair(std::string::npos, std::string::npos);
+    r.first = s.find(open_bracket, i);
+    r.second = find_closing_bracket(s, close_bracket, r.first);
+    return r;
 }
 
 template<class T>
@@ -456,7 +464,16 @@ assign_var_result container_var_from_string(std::vector<T>& ref, std::string con
         if (idx >= ref.size()) return assign_var_result::idx_out_of_bounds;
         return var_from_string(ref[idx], var_suffix.substr(i+1), value);
     }
-    // todo: front(), back(), etc.
+    if (var_suffix[0] == '.') {
+        auto [b1, b2] = find_brackets(var_suffix, '(', ')', 1);
+        if (b2 != std::string::npos) {
+            auto name = var_suffix.substr(1, b1-1);
+            auto args = var_suffix.substr(b1+1, b2-b1-1);
+            if (args != "") return {};
+            if (name == "front") return var_from_string(ref.front(), var_suffix.substr(b2+1), value);
+            else if (name == "back") return var_from_string(ref.back(), var_suffix.substr(b2+1), value);
+        }
+    }
     return assign_var_result::invalid_syntax;
 }
 
@@ -472,7 +489,17 @@ var_to_string_result container_var_to_string(std::vector<T> const& ref, std::str
         if (idx >= ref.size()) return {};
         return var_to_string(ref[idx], var_suffix.substr(i+1));
     }
-    // todo: front(), back(), etc.
+    if (var_suffix[0] == '.') {
+        auto [b1, b2] = find_brackets(var_suffix, '(', ')', 1);
+        if (b2 != std::string::npos) {
+            auto name = var_suffix.substr(1, b1-1);
+            auto args = var_suffix.substr(b1+1, b2-b1-1);
+            if (args != "") return {};
+            if (name == "size") return { true, *to_string(ref.size()) };
+            else if (name == "front") return var_to_string(ref.front(), var_suffix.substr(b2+1));
+            else if (name == "back") return var_to_string(ref.back(), var_suffix.substr(b2+1));
+        }
+    }
     return {};
 }
 
