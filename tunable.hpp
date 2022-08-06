@@ -260,7 +260,8 @@ struct var_expr_evaluation {
 
     template <class T>
     bool assign_to(T& ref) const {
-        if (ptr && ptr->type() == std::type_index(typeid(ref))) {
+        if (!ptr) return false;
+        if (ptr->type() == std::type_index(typeid(ref))) {
             // if types match assign directly
             ref = ptr->value<T>(); // todo: move if ptr owned?
         }
@@ -576,6 +577,7 @@ var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
 template<class T>
 var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
     auto eval = evaluate_expression(suffix);
+    if (eval.result != var_expr_eval_result::ok) return eval;
     if (!eval.assign_to(ref)) return var_expr_evaluation::error(var_expr_eval_result::bad_value_assign);
     return var_expr_evaluation::lvalue(ref);
 }
