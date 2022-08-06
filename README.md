@@ -15,7 +15,7 @@ Use `tunable(x)` to capture variable `x` for tweaking at runtime.
 
 Use `tunable(Class, x)` to capture member variable `Class::x` for all tunable instances of `Class`.
 
-For custom types you should overload the stream operators `<<` and `>>`.
+Optionally, for custom types you may overload the stream operators `<<` and `>>`. This enables printing and assigning them using custom syntax.
 
 Call `tunablecmd()` to enter the interactive command line.
 
