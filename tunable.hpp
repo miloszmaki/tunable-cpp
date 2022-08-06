@@ -488,7 +488,7 @@ private:
 };
 
 
-var_expr_evaluation evaluate_expression(std::string const& expr);
+var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assignment = false);
 
 size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
     if (i >= s.size()) return std::string::npos;
@@ -576,7 +576,7 @@ var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
 
 template<class T>
 var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
-    auto eval = evaluate_expression(suffix);
+    auto eval = evaluate_expression(suffix, true);
     if (eval.result != var_expr_eval_result::ok) return eval;
     if (!eval.assign_to(ref)) return var_expr_evaluation::error(var_expr_eval_result::bad_value_assign);
     return var_expr_evaluation::lvalue(ref);
@@ -602,7 +602,7 @@ var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix) {
     return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
 }
 
-var_expr_evaluation evaluate_expression(std::string const& expr) {
+var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assignment) {
     if (expr.empty()) return var_expr_evaluation::error(var_expr_eval_result::not_found); // todo: what to return here?
     auto ret = process_var_name_prefixes(expr,
         std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
@@ -631,6 +631,7 @@ var_expr_evaluation evaluate_expression(std::string const& expr) {
         else if (is_double(expr)) return var_expr_evaluation::rvalue(std::stod(expr));
         else if (is_integer(expr)) return var_expr_evaluation::rvalue(std::stoll(expr));
         else if (is_bool(expr)) return var_expr_evaluation::rvalue(expr == "true");
+        else if (for_assignment) return var_expr_evaluation::rvalue(expr);
     }
     catch (std::exception &e) {
         std::cout << "Exception: parse failed (" << e.what() << ")\n";
