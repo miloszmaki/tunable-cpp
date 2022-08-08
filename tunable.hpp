@@ -238,6 +238,7 @@ struct var_expr_evaluation {
     var_expr_evaluation& operator=(var_expr_evaluation &&) = default;
     virtual ~var_expr_evaluation() {}
 
+    // todo: shouldn't be called error, because there is e.g. return_void
     static var_expr_evaluation error(var_expr_eval_result r) {
         var_expr_evaluation eval;
         eval.result = r;
@@ -534,25 +535,48 @@ var_expr_evaluation evaluate_container_var_expr(std::vector<T>& ref, std::string
         if (b2 != std::string::npos) {
             auto name = suffix.substr(1, b1-1);
             auto args = suffix.substr(b1+1, b2-b1-1);
-            //if (args != "") return {}; // todo: validate args
+            // methods with arguments
+            if (name == "push_back") {
+                auto eval = evaluate_expression(args);
+                if (eval.result != var_expr_eval_result::ok) return eval;
+                if (eval.ptr && eval.ptr->type() == std::type_index(typeid(T))) {
+                    ref.push_back(eval.ptr->value<T>());
+                    return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                }
+                return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+            }
+            else if (name == "resize") {
+                auto eval = evaluate_expression(args);
+                if (eval.result != var_expr_eval_result::ok) return eval;
+                // todo: support multiple arguments
+                if (eval.ptr) {
+                    auto s = eval.ptr->to_string();
+                    if (s && is_integer(*s)) {
+                        ref.resize(std::stoll(*s));
+                        return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                    }
+                }
+                return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+            }
+            // methods without arguments
+            if (args != "") return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
             if (name == "size") {
                 // todo: here we should call evaluate_var_expression instead
                 // to enable further processing of suffix
                 // but tell it that it's non-assignable (rvalue)
                 return var_expr_evaluation::rvalue(ref.size());
             }
-            if (name == "front") return evaluate_var_expression(ref.front(), suffix.substr(b2+1));
+            else if (name == "capacity") return var_expr_evaluation::rvalue(ref.capacity());
+            else if (name == "empty") return var_expr_evaluation::rvalue(ref.empty());
+            else if (name == "front") return evaluate_var_expression(ref.front(), suffix.substr(b2+1));
             else if (name == "back") return evaluate_var_expression(ref.back(), suffix.substr(b2+1));
             else if (name == "pop_back") {
                 ref.pop_back();
                 return var_expr_evaluation::error(var_expr_eval_result::return_void);
             }
-            else if (name == "push_back") {
-                auto eval = evaluate_expression(args);
-                if (eval.ptr && eval.ptr->type() == std::type_index(typeid(T))) {
-                    ref.push_back(eval.ptr->value<T>());
-                    return var_expr_evaluation::error(var_expr_eval_result::return_void);
-                }
+            else if (name == "clear") {
+                ref.clear();
+                return var_expr_evaluation::error(var_expr_eval_result::return_void);
             }
         }
     }
@@ -607,7 +631,7 @@ var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assign
     auto ret = process_var_name_prefixes(expr,
         std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
             auto type = tunable_types::find_type_of_var(prefix);
-            if (!type) return {};
+            if (!type) return std::nullopt;
             return type->evaluate_var_expr(prefix, suffix);
         })
     );
