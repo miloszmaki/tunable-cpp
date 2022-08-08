@@ -580,6 +580,9 @@ var_expr_evaluation evaluate_container_var_expr(std::vector<T>& ref, std::string
             }
         }
     }
+    if (suffix[0] == '=') {
+        return evaluate_var_assignment(ref, suffix.substr(1));
+    }
     return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
 }
 
