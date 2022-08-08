@@ -62,6 +62,10 @@ inline bool is_integer(std::string const& s) {
     return std::regex_match(s, std::regex("[-+]?\\d+"));
 }
 
+inline bool is_hex(std::string const& s) {
+    return std::regex_match(s, std::regex("0[xX][0-9a-fA-F]+"));
+}
+
 inline bool is_bool(std::string const& s) {
     return s == "true" || s == "false";
 }
@@ -129,7 +133,7 @@ std::optional<T> process_var_name_prefixes(std::string const& name, std::functio
             auto suffix = name.substr(i);
             return func(prefix, suffix);
         }
-        if (name[i] == '.' || name[i] == '[' || name[i] == ']') { // todo: handle nested brackets properly
+        if (name[i] == '.' || name[i] == '[' || name[i] == ']' || name[i] == '-' || name[i] == '+') { // todo: handle nested brackets properly
             auto prefix = name.substr(0, i);
             auto suffix = name.substr(i);
             auto ret = func(prefix, suffix);
@@ -139,7 +143,7 @@ std::optional<T> process_var_name_prefixes(std::string const& name, std::functio
     return func(name, "");
 }
 
-template<class T>
+template <class T>
 bool from_string(T& ref, std::string const& s) {
     if constexpr(is_in_streamable<T>::value) {
         std::stringstream ss(s);
@@ -181,6 +185,20 @@ bool from_string(bool& ref, std::string const& s) {
 }
 
 template <class T>
+bool from_string(T*& ref, std::string const& s) {
+    if (s == "nullptr" || s == "NULL") {
+        ref = nullptr;
+        return true;
+    }
+    bool hex = is_hex(s);
+    if (!hex && !is_integer(s)) return false;
+    std::stringstream ss(s);
+    if (hex) ss >> std::hex;
+    ss >> reinterpret_cast<size_t&>(ref);
+    return true;
+}
+
+template <class T>
 std::optional<std::string> stringify(T const& ref) {
     if constexpr (is_out_streamable<T>::value) {
         std::stringstream ss;
@@ -196,6 +214,14 @@ std::optional<std::string> stringify(T const& ref) {
 template <>
 std::optional<std::string> stringify(bool const& ref) {
     return ref ? "true" : "false";
+}
+
+template <class T>
+std::optional<std::string> stringify(T* const& ref) {
+    if (!ref) return "nullptr";
+    std::stringstream ss;
+    ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(ref);
+    return ss.str();
 }
 
 
@@ -245,28 +271,45 @@ struct var_expr_evaluation {
         return eval;
     }
 
+    template <class T> static var_expr_evaluation lvalue(T& ref) { return lvalue(ref, false); }
+    template <class T> static var_expr_evaluation lvalue(T*& ref) { return lvalue(ref, true); }
+
+    template <class T> static var_expr_evaluation rvalue(T const& ref) { return rvalue(ref, false); }
+    template <class T> static var_expr_evaluation rvalue(T* const& ref) { return rvalue(ref, true); }
+
+    template <class T> bool assign_to(T& ref) const { return assign_to(ref, false); }
+    template <class T> bool assign_to(T*& ref) const { return assign_to(ref, true); }
+
+private:
+    bool value_is_ptr = false;
+
+    var_expr_evaluation() {}
+
     template <class T>
-    static var_expr_evaluation lvalue(T &ref) {
+    static var_expr_evaluation lvalue(T& ref, bool is_ptr) {
         var_expr_evaluation eval;
         eval.ptr = std::make_unique<pointer<T>>(&ref, false);
+        eval.value_is_ptr = is_ptr;
         return eval;
     }
 
     template <class T>
-    static var_expr_evaluation rvalue(T const& ref) {
+    static var_expr_evaluation rvalue(T const& ref, bool is_ptr) {
         var_expr_evaluation eval;
         eval.ptr = std::make_unique<pointer<T>>(new T(ref), true);
+        eval.value_is_ptr = is_ptr;
         return eval;
     }
 
     template <class T>
-    bool assign_to(T& ref) const {
+    bool assign_to(T& ref, bool ref_is_ptr) const {
         if (!ptr) return false;
         if (ptr->type() == std::type_index(typeid(ref))) {
             // if types match assign directly
             ref = ptr->value<T>(); // todo: move if ptr owned?
         }
         else {
+            if (ref_is_ptr && value_is_ptr) return false; // forbid implicit casting of pointers of different type
             auto str = ptr->to_string(); // serialize
             if (!str) return false;
              // deserialize
@@ -274,9 +317,6 @@ struct var_expr_evaluation {
         }
         return true;
     }
-
-private:
-    var_expr_evaluation() {}
 
     template <class T>
     struct pointer : public any_pointer {
@@ -313,7 +353,7 @@ private:
     };
 };
 
-template<class T>
+template <class T>
 var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix);
 
 // interface for variable search and assignment
@@ -422,7 +462,7 @@ public:
 };
 
 // holds all tunable members for a given class
-template<class T>
+template <class T>
 class member_vars {
 public:
     static member_var_base_typed<T>* find_member(std::string const& name) {
@@ -450,7 +490,7 @@ private:
         self.members.erase(name);
     }
 
-    template<class U, class M>
+    template <class U, class M>
     friend class member_var;
 };
 
@@ -512,23 +552,51 @@ std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket,
     return r;
 }
 
-template<class T>
-var_expr_evaluation evaluate_container_var_expr(T& ref, std::string const& suffix) {
+template <class T>
+var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
+    auto eval = evaluate_expression(suffix, true);
+    if (eval.result != var_expr_eval_result::ok) return eval;
+    if (!eval.assign_to(ref)) return var_expr_evaluation::error(var_expr_eval_result::bad_value_assign);
+    return var_expr_evaluation::lvalue(ref);
+}
+
+template <class T>
+var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
+    auto ret = process_var_name_prefixes(suffix,
+        std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
+            auto var = member_vars<T>::find_member(prefix);
+            if (!var) return std::nullopt;
+            auto ret = var->evaluate_expression(ref, suffix);
+            if (ret.result != var_expr_eval_result::not_found) return ret;
+            return std::nullopt;
+        })
+    );
+    if (ret) return std::move(*ret);
     return var_expr_evaluation::error(var_expr_eval_result::not_found);
 }
 
-template<class T>
-var_expr_evaluation evaluate_container_var_expr(std::vector<T>& ref, std::string const& suffix) {
+template <class T>
+var_expr_evaluation evaluate_typed_var_expr(T& ref, std::string const& suffix) {
+    return var_expr_evaluation::error(var_expr_eval_result::not_found);
+}
+
+template <class T>
+var_expr_evaluation evaluate_subscript(T& ref, size_t size, std::string const& suffix) {
+    int i = find_closing_bracket(suffix, ']');
+    if (i <= 1) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    auto idx_eval = evaluate_expression(suffix.substr(1, i-1));
+    auto str = idx_eval.ptr->to_string();
+    if (!str) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    size_t idx = -1;
+    if (!from_string(idx, *str)) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    if (idx >= size) return var_expr_evaluation::error(var_expr_eval_result::idx_out_of_bounds);
+    return evaluate_var_expression(ref[idx], suffix.substr(i+1));
+}
+
+template <class T>
+var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string const& suffix) {
     if (suffix[0] == '[') {
-        int i = find_closing_bracket(suffix, ']');
-        if (i <= 1) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
-        auto idx_eval = evaluate_expression(suffix.substr(1, i-1));
-        auto str = idx_eval.ptr->to_string();
-        if (!str) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
-        size_t idx = -1;
-        if (!from_string(idx, *str)) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
-        if (idx >= ref.size()) return var_expr_evaluation::error(var_expr_eval_result::idx_out_of_bounds);
-        return evaluate_var_expression(ref[idx], suffix.substr(i+1));
+        return evaluate_subscript(ref, ref.size(), suffix);
     }
     if (suffix[0] == '.') {
         auto [b1, b2] = find_brackets(suffix, '(', ')', 1);
@@ -586,37 +654,29 @@ var_expr_evaluation evaluate_container_var_expr(std::vector<T>& ref, std::string
     return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
 }
 
-template<class T>
-var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
-    auto ret = process_var_name_prefixes(suffix,
-        std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
-            auto var = member_vars<T>::find_member(prefix);
-            if (!var) return std::nullopt;
-            auto ret = var->evaluate_expression(ref, suffix);
-            if (ret.result != var_expr_eval_result::not_found) return ret;
-            return std::nullopt;
-        })
-    );
-    if (ret) return std::move(*ret);
-    return var_expr_evaluation::error(var_expr_eval_result::not_found);
+template <class T>
+var_expr_evaluation evaluate_typed_var_expr(T*& ref, std::string const& suffix) {
+    if (suffix[0] == '[') {
+        size_t unknown_size = -1;
+        return evaluate_subscript(ref, unknown_size, suffix);
+    }
+    if (suffix.substr(0, 2) == "->") {
+        return evaluate_var_member(*ref, suffix.substr(2));
+    }
+    if (suffix[0] == '=') {
+        return evaluate_var_assignment(ref, suffix.substr(1));
+    }
+    return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
 }
 
-template<class T>
-var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
-    auto eval = evaluate_expression(suffix, true);
-    if (eval.result != var_expr_eval_result::ok) return eval;
-    if (!eval.assign_to(ref)) return var_expr_evaluation::error(var_expr_eval_result::bad_value_assign);
-    return var_expr_evaluation::lvalue(ref);
-}
-
-template<class T>
+template <class T>
 var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix) {
     if (suffix.empty()) {
         // todo: create and return rvalue if ref not assignable
         return var_expr_evaluation::lvalue(ref);
     }
     {
-        auto ret = evaluate_container_var_expr(ref, suffix);
+        auto ret = evaluate_typed_var_expr(ref, suffix);
         if (ret.result != var_expr_eval_result::not_found) return ret;
     }
     if (suffix[0] == '.') {
