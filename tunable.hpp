@@ -264,8 +264,7 @@ struct var_expr_evaluation {
     var_expr_evaluation& operator=(var_expr_evaluation &&) = default;
     virtual ~var_expr_evaluation() {}
 
-    // todo: shouldn't be called error, because there is e.g. return_void
-    static var_expr_evaluation error(var_expr_eval_result r) {
+    static var_expr_evaluation no_value(var_expr_eval_result r) {
         var_expr_evaluation eval;
         eval.result = r;
         return eval;
@@ -403,7 +402,7 @@ public:
     virtual var_expr_evaluation evaluate_var_expr(std::string const& name, std::string const& suffix) {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
-        if (!var) return var_expr_evaluation::error(var_expr_eval_result::not_found);
+        if (!var) return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
         return evaluate_var_expression(var->ref, suffix);
     }
 private:
@@ -556,7 +555,7 @@ template <class T>
 var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
     auto eval = evaluate_expression(suffix, true);
     if (eval.result != var_expr_eval_result::ok) return eval;
-    if (!eval.assign_to(ref)) return var_expr_evaluation::error(var_expr_eval_result::bad_value_assign);
+    if (!eval.assign_to(ref)) return var_expr_evaluation::no_value(var_expr_eval_result::bad_value_assign);
     return var_expr_evaluation::lvalue(ref);
 }
 
@@ -572,24 +571,24 @@ var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
         })
     );
     if (ret) return std::move(*ret);
-    return var_expr_evaluation::error(var_expr_eval_result::not_found);
+    return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
 }
 
 template <class T>
 var_expr_evaluation evaluate_typed_var_expr(T& ref, std::string const& suffix) {
-    return var_expr_evaluation::error(var_expr_eval_result::not_found);
+    return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
 }
 
 template <class T>
 var_expr_evaluation evaluate_subscript(T& ref, size_t size, std::string const& suffix) {
     int i = find_closing_bracket(suffix, ']');
-    if (i <= 1) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    if (i <= 1) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
     auto idx_eval = evaluate_expression(suffix.substr(1, i-1));
     auto str = idx_eval.ptr->to_string();
-    if (!str) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    if (!str) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
     size_t idx = -1;
-    if (!from_string(idx, *str)) return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
-    if (idx >= size) return var_expr_evaluation::error(var_expr_eval_result::idx_out_of_bounds);
+    if (!from_string(idx, *str)) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    if (idx >= size) return var_expr_evaluation::no_value(var_expr_eval_result::idx_out_of_bounds);
     return evaluate_var_expression(ref[idx], suffix.substr(i+1));
 }
 
@@ -609,9 +608,9 @@ var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string con
                 if (eval.result != var_expr_eval_result::ok) return eval;
                 if (eval.ptr && eval.ptr->type() == std::type_index(typeid(T))) {
                     ref.push_back(eval.ptr->value<T>());
-                    return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                    return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
                 }
-                return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+                return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
             }
             else if (name == "resize") {
                 auto eval = evaluate_expression(args);
@@ -621,13 +620,13 @@ var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string con
                     auto s = eval.ptr->to_string();
                     if (s && is_integer(*s)) {
                         ref.resize(std::stoll(*s));
-                        return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                        return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
                     }
                 }
-                return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+                return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
             }
             // methods without arguments
-            if (args != "") return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+            if (args != "") return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
             if (name == "size") {
                 // todo: here we should call evaluate_var_expression instead
                 // to enable further processing of suffix
@@ -640,18 +639,18 @@ var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string con
             else if (name == "back") return evaluate_var_expression(ref.back(), suffix.substr(b2+1));
             else if (name == "pop_back") {
                 ref.pop_back();
-                return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
             }
             else if (name == "clear") {
                 ref.clear();
-                return var_expr_evaluation::error(var_expr_eval_result::return_void);
+                return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
             }
         }
     }
     if (suffix[0] == '=') {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
-    return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
 }
 
 template <class T>
@@ -666,7 +665,7 @@ var_expr_evaluation evaluate_typed_var_expr(T*& ref, std::string const& suffix) 
     if (suffix[0] == '=') {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
-    return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
 }
 
 template <class T>
@@ -686,11 +685,11 @@ var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix) {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
     // todo: more expressions
-    return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
 }
 
 var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assignment) {
-    if (expr.empty()) return var_expr_evaluation::error(var_expr_eval_result::not_found); // todo: what to return here?
+    if (expr.empty()) return var_expr_evaluation::no_value(var_expr_eval_result::not_found); // todo: what to return here?
     auto ret = process_var_name_prefixes(expr,
         std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
             auto type = tunable_types::find_type_of_var(prefix);
@@ -703,11 +702,11 @@ var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assign
     auto eq = find_not_quoted(expr, '=');
     if (eq != std::string::npos) { // create new variable
         auto name = expr.substr(0, eq);
-        if (!is_valid_var_name(name)) return var_expr_evaluation::error(var_expr_eval_result::invalid_var_name);
+        if (!is_valid_var_name(name)) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_var_name);
         auto suffix = expr.substr(eq+1);
         auto eval = evaluate_expression(suffix);
         if (eval.result != var_expr_eval_result::ok) return eval;
-        if (!eval.ptr) return var_expr_evaluation::error(var_expr_eval_result::impossible);
+        if (!eval.ptr) return var_expr_evaluation::no_value(var_expr_eval_result::impossible);
         return eval.ptr->create_var(name);
     }
 
@@ -722,12 +721,12 @@ var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assign
     }
     catch (std::exception &e) {
         std::cout << "Exception: parse failed (" << e.what() << ")\n";
-        return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+        return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
     }
     if (is_valid_var_name(expr)) {
-        return var_expr_evaluation::error(var_expr_eval_result::undefined);
+        return var_expr_evaluation::no_value(var_expr_eval_result::undefined);
     }
-    return var_expr_evaluation::error(var_expr_eval_result::invalid_syntax);
+    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
 }
 
 // todo: tidy up the results and multiple error couts
