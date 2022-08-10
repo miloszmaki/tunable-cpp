@@ -39,6 +39,7 @@ SOFTWARE.
 #include <memory>
 #include <regex>
 #include <typeindex>
+#include <variant>
 
 namespace _tunable_impl {
 
@@ -243,134 +244,131 @@ private:
     void remove_from_type(std::string const& name);
 };
 
-enum class var_expr_eval_result { ok, not_found, return_void, invalid_syntax, undefined, bad_value_assign, invalid_var_name, idx_out_of_bounds };
+enum class var_expr_eval_error { invalid_syntax, undefined, void_to_value, bad_value_assign, invalid_var_name, idx_out_of_bounds };
 
-struct var_expr_evaluation { // todo: variant<any_pointer, void, error> ?
-    struct any_pointer {
-        virtual ~any_pointer() {}
-        virtual std::type_index type() const = 0;
-        virtual std::optional<std::string> to_string() const = 0;
-        virtual var_expr_evaluation create_var(std::string const& name) = 0;
-
-        template <class T>
-        T const& value() const {
-            return reinterpret_cast<pointer<T> const*>(this)->value();
-        }
+std::string to_string(var_expr_eval_error e) {
+    static const std::map<var_expr_eval_error, std::string> errors{
+        {var_expr_eval_error::invalid_syntax, "invalid syntax"},
+        {var_expr_eval_error::undefined, "undefined"},
+        {var_expr_eval_error::void_to_value, "void cannot be converted to value"},
+        {var_expr_eval_error::bad_value_assign, "bad value assignment"},
+        {var_expr_eval_error::invalid_var_name, "invalid variable name"},
+        {var_expr_eval_error::idx_out_of_bounds, "index out of bounds"}
     };
+    return errors.at(e);
+}
 
-    bool operator==(var_expr_eval_result r) const { return result == r; }
-    bool operator!=(var_expr_eval_result r) const { return result != r; }
-    any_pointer* operator->() { return ptr.get(); }
+class var_expr_eval {
+public:
+    var_expr_eval(bool is_ptr) : value_is_ptr(is_ptr) {}
+    virtual ~var_expr_eval() {}
 
-    var_expr_evaluation(var_expr_evaluation &&) = default;
-    var_expr_evaluation& operator=(var_expr_evaluation &&) = default;
-    virtual ~var_expr_evaluation() {}
+    template <class T> bool is() const { return type() == std::type_index(typeid(T)); }
 
-    static var_expr_evaluation no_value(var_expr_eval_result r) {
-        return { r, {}, false };
-    }
+    template <class T> T const& value() const;
 
-    template <class T> static var_expr_evaluation lvalue(T& ref) { return lvalue(ref, false); }
-    template <class T> static var_expr_evaluation lvalue(T*& ref) { return lvalue(ref, true); }
+    virtual std::optional<std::string> to_string() const = 0;
+    virtual std::unique_ptr<var_expr_eval> create_var(std::string const& name) = 0;
 
-    template <class T> static var_expr_evaluation rvalue(T const& ref) { return rvalue(ref, false); }
-    template <class T> static var_expr_evaluation rvalue(T* const& ref) { return rvalue(ref, true); }
+    template <class T> static std::unique_ptr<var_expr_eval> make_lvalue(T& ref) { return make_lvalue(ref, false); }
+    template <class T> static std::unique_ptr<var_expr_eval> make_lvalue(T*& ref) { return make_lvalue(ref, true); }
+
+    template <class T> static std::unique_ptr<var_expr_eval> make_rvalue(T const& ref) { return make_rvalue(ref, false); }
+    template <class T> static std::unique_ptr<var_expr_eval> make_rvalue(T* const& ref) { return make_rvalue(ref, true); }
+
+    static std::unique_ptr<var_expr_eval> make_void() { return {}; }
 
     template <class T> bool assign_to(T& ref) const { return assign_to(ref, false); }
     template <class T> bool assign_to(T*& ref) const { return assign_to(ref, true); }
 
-    std::string result_str() {
-        static const std::map<var_expr_eval_result, std::string> results{
-            {var_expr_eval_result::ok, "ok"},
-            {var_expr_eval_result::not_found, "not found"},
-            {var_expr_eval_result::return_void, "void"},
-            {var_expr_eval_result::invalid_syntax, "invalid syntax"},
-            {var_expr_eval_result::undefined, "undefined"},
-            {var_expr_eval_result::bad_value_assign, "bad value assignment"},
-            {var_expr_eval_result::invalid_var_name, "invalid variable name"},
-            {var_expr_eval_result::idx_out_of_bounds, "index out of bounds"}
-        };
-        return results.at(result);
-    }
-
 private:
-    var_expr_eval_result result;
-    std::unique_ptr<any_pointer> ptr;
-    bool value_is_ptr;
+    bool value_is_ptr = false;
 
-    var_expr_evaluation(var_expr_eval_result result, std::unique_ptr<any_pointer> ptr, bool value_is_ptr)
-        : result(result), ptr(std::move(ptr)), value_is_ptr(value_is_ptr) {}
+    virtual std::type_index type() const = 0;
 
-    template <class T>
-    static var_expr_evaluation lvalue(T& ref, bool is_ptr) {
-        return { var_expr_eval_result::ok, std::make_unique<pointer<T>>(&ref, false), is_ptr };
-    }
-
-    template <class T>
-    static var_expr_evaluation rvalue(T const& ref, bool is_ptr) {
-        return { var_expr_eval_result::ok, std::make_unique<pointer<T>>(new T(ref), true), is_ptr };
-    }
+    template <class T> static std::unique_ptr<var_expr_eval> make_lvalue(T& ref, bool is_ptr);
+    template <class T> static std::unique_ptr<var_expr_eval> make_rvalue(T const& ref, bool is_ptr);
 
     template <class T>
     bool assign_to(T& ref, bool ref_is_ptr) const {
-        if (!ptr) return false;
-        if (ptr->type() == std::type_index(typeid(ref))) {
+        if (is<T>()) {
             // if types match assign directly
-            ref = ptr->value<T>(); // todo: move if ptr owned?
+            ref = value<T>(); // todo: move if ptr owned?
         }
         else {
             if (ref_is_ptr && value_is_ptr) return false; // forbid implicit casting of pointers of different type
-            auto str = ptr->to_string(); // serialize
+            auto str = to_string(); // serialize
             if (!str) return false;
              // deserialize
             if (!from_string(ref, *str)) return false;
         }
         return true;
     }
-
-    template <class T>
-    struct pointer : public any_pointer {
-        T* ptr = nullptr;
-        bool owned = false;
-
-        pointer(T* ptr, bool owned) : ptr(ptr), owned(owned) {}
-
-        T const& value() const { return *ptr; }
-
-        virtual ~pointer() {
-            if (owned && ptr) delete ptr;
-        }
-
-        virtual std::type_index type() const { return typeid(T); }
-
-        virtual std::optional<std::string> to_string() const {
-            return stringify(*ptr);
-        }
-
-        virtual var_expr_evaluation create_var(std::string const& name) {
-            T* ptr2 = nullptr;
-            if (owned) { // move
-                ptr2 = ptr;
-                owned = false; // prevent deletion
-            }
-            else { // copy
-                ptr2 = new T(value());
-            }
-            T& ref2 = *ptr2;
-            new tunable<T>(ref2, name);
-            return var_expr_evaluation::lvalue(ref2);
-        }
-    };
 };
 
 template <class T>
-var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix);
+class var_expr_eval_typed : public var_expr_eval {
+public:
+    var_expr_eval_typed(T* ptr, bool owned, bool value_is_ptr) : var_expr_eval(value_is_ptr), ptr(ptr), owned(owned) {}
+
+    virtual ~var_expr_eval_typed() {
+        if (owned && ptr) delete ptr;
+    }
+
+    T const& value() const { return *ptr; }
+
+    virtual std::optional<std::string> to_string() const {
+        return stringify(*ptr);
+    }
+
+    virtual std::unique_ptr<var_expr_eval> create_var(std::string const& name) {
+        T* ptr2 = nullptr;
+        if (owned) { // move
+            ptr2 = ptr;
+            owned = false; // prevent deletion
+        }
+        else { // copy
+            ptr2 = new T(value());
+        }
+        T& ref2 = *ptr2;
+        new tunable<T>(ref2, name);
+        return var_expr_eval::make_lvalue(ref2);
+    }
+
+private:
+    T* ptr = nullptr;
+    bool owned = false;
+
+    virtual std::type_index type() const { return typeid(T); }
+};
+
+template <class T>
+T const& var_expr_eval::value() const{
+    return reinterpret_cast<var_expr_eval_typed<T> const*>(this)->value();
+}
+
+template <class T>
+std::unique_ptr<var_expr_eval> var_expr_eval::make_lvalue(T& ref, bool is_ptr) {
+    return std::make_unique<var_expr_eval_typed<T>>(&ref, false, is_ptr);
+}
+
+template <class T>
+std::unique_ptr<var_expr_eval> var_expr_eval::make_rvalue(T const& ref, bool is_ptr) {
+    return std::make_unique<var_expr_eval_typed<T>>(new T(ref), true, is_ptr);
+}
+
+using var_expr_eval_ptr = std::unique_ptr<var_expr_eval>;
+
+using var_expr_eval_result = std::variant<var_expr_eval_ptr, var_expr_eval_error>;
+
+template <class T>
+var_expr_eval_result evaluate_var_expression(T& ref, std::string const& suffix);
 
 // interface for variable search and assignment
 class tunable_type_base {
 public:
     virtual ~tunable_type_base() {}
-    virtual var_expr_evaluation evaluate_var_expr(std::string const& name, std::string const& suffix) = 0;
+    virtual var_expr_eval_result evaluate_var_expr(std::string const& name, std::string const& suffix) = 0;
 };
 
 // holds a mapping from the variable names to their types
@@ -410,10 +408,10 @@ private:
 template <class T>
 class tunable_type : public tunable_type_base {
 public:
-    virtual var_expr_evaluation evaluate_var_expr(std::string const& name, std::string const& suffix) {
+    virtual var_expr_eval_result evaluate_var_expr(std::string const& name, std::string const& suffix) {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
-        if (!var) return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
+        if (!var) return var_expr_eval_error::undefined;
         return evaluate_var_expression(var->ref, suffix);
     }
 private:
@@ -468,7 +466,7 @@ template <class T>
 class member_var_base_typed : public member_var_base {
 public:
     virtual ~member_var_base_typed() {}
-    virtual var_expr_evaluation evaluate_expression(T& ref, std::string const& suffix) = 0;
+    virtual var_expr_eval_result evaluate_expression(T& ref, std::string const& suffix) = 0;
 };
 
 // holds all tunable members for a given class
@@ -511,7 +509,7 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    virtual var_expr_evaluation evaluate_expression(T& ref, std::string const& suffix) {
+    virtual var_expr_eval_result evaluate_expression(T& ref, std::string const& suffix) {
         auto& member_ref = get_ref(ref);
         return evaluate_var_expression(member_ref, suffix);
     }
@@ -539,7 +537,7 @@ private:
 };
 
 
-var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assignment = false);
+var_expr_eval_result evaluate_expression(std::string const& expr, bool for_assignment = false);
 
 size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
     if (i >= s.size()) return std::string::npos;
@@ -563,49 +561,52 @@ std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket,
 }
 
 template <class T>
-var_expr_evaluation evaluate_var_assignment(T& ref, std::string const &suffix) {
+var_expr_eval_result evaluate_var_assignment(T& ref, std::string const &suffix) {
     auto eval = evaluate_expression(suffix, true);
-    if (eval != var_expr_eval_result::ok) return eval;
-    if (!eval.assign_to(ref)) return var_expr_evaluation::no_value(var_expr_eval_result::bad_value_assign);
-    return var_expr_evaluation::lvalue(ref);
+    if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
+    auto& ptr = std::get<var_expr_eval_ptr>(eval);
+    if (!ptr || !ptr->assign_to(ref)) return var_expr_eval_error::bad_value_assign;
+    return var_expr_eval::make_lvalue(ref);
 }
 
 template <class T>
-var_expr_evaluation evaluate_var_member(T& ref, std::string const &suffix) {
+var_expr_eval_result evaluate_var_member(T& ref, std::string const &suffix) {
     auto ret = process_var_name_prefixes(suffix,
-        std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
+        std::function([&](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_eval_result> {
             auto var = member_vars<T>::find_member(prefix);
             if (!var) return std::nullopt;
             auto ret = var->evaluate_expression(ref, suffix);
-            if (ret == var_expr_eval_result::ok || ret == var_expr_eval_result::return_void) return ret;
+            if (std::holds_alternative<var_expr_eval_ptr>(ret)) return ret;
             return std::nullopt;
         })
     );
     if (ret) return std::move(*ret);
-    return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
+    return var_expr_eval_error::undefined;
 }
 
 template <class T>
-var_expr_evaluation evaluate_typed_var_expr(T& ref, std::string const& suffix) {
-    return var_expr_evaluation::no_value(var_expr_eval_result::not_found);
+std::optional<var_expr_eval_result> evaluate_typed_var_expr(T& ref, std::string const& suffix) {
+    return std::nullopt;
 }
 
 template <class T>
-var_expr_evaluation evaluate_subscript(T& ref, size_t size, std::string const& suffix) {
+var_expr_eval_result evaluate_subscript(T& ref, size_t size, std::string const& suffix) {
     int i = find_closing_bracket(suffix, ']');
-    if (i <= 1) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    if (i <= 1) return var_expr_eval_error::invalid_syntax;
     auto idx_eval = evaluate_expression(suffix.substr(1, i-1));
-    if (idx_eval != var_expr_eval_result::ok) return idx_eval;
-    auto str = idx_eval->to_string();
-    if (!str) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    if (!std::holds_alternative<var_expr_eval_ptr>(idx_eval)) return idx_eval;
+    auto& idx_ptr = std::get<var_expr_eval_ptr>(idx_eval);
+    if (!idx_ptr) return var_expr_eval_error::void_to_value;
+    auto str = idx_ptr->to_string();
+    if (!str) return var_expr_eval_error::invalid_syntax;
     size_t idx = -1;
-    if (!from_string(idx, *str)) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
-    if (idx >= size) return var_expr_evaluation::no_value(var_expr_eval_result::idx_out_of_bounds);
+    if (!from_string(idx, *str)) return var_expr_eval_error::invalid_syntax;
+    if (idx >= size) return var_expr_eval_error::idx_out_of_bounds;
     return evaluate_var_expression(ref[idx], suffix.substr(i+1));
 }
 
 template <class T>
-var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string const& suffix) {
+std::optional<var_expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, std::string const& suffix) {
     if (suffix[0] == '[') {
         return evaluate_subscript(ref, ref.size(), suffix);
     }
@@ -617,54 +618,58 @@ var_expr_evaluation evaluate_typed_var_expr(std::vector<T>& ref, std::string con
             // methods with arguments
             if (name == "push_back") {
                 auto eval = evaluate_expression(args);
-                if (eval != var_expr_eval_result::ok) return eval;
-                if (eval->type() == std::type_index(typeid(T))) {
-                    ref.push_back(eval->value<T>());
-                    return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
+                if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
+                auto& ptr = std::get<var_expr_eval_ptr>(eval);
+                if (!ptr) return var_expr_eval_error::void_to_value;
+                if (ptr->is<T>()) {
+                    ref.push_back(ptr->value<T>());
+                    return var_expr_eval::make_void();
                 }
-                return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+                return var_expr_eval_error::invalid_syntax;
             }
             else if (name == "resize") {
                 auto eval = evaluate_expression(args);
-                if (eval != var_expr_eval_result::ok) return eval;
+                if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
+                auto& ptr = std::get<var_expr_eval_ptr>(eval);
+                if (!ptr) return var_expr_eval_error::void_to_value;
                 // todo: support multiple arguments
-                auto s = eval->to_string();
+                auto s = ptr->to_string();
                 if (s && is_integer(*s)) {
                     ref.resize(std::stoll(*s));
-                    return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
+                    return var_expr_eval::make_void();
                 }
-                return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+                return var_expr_eval_error::invalid_syntax;
             }
             // methods without arguments
-            if (args != "") return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+            if (args != "") return var_expr_eval_error::invalid_syntax;
             if (name == "size") {
                 // todo: here we should call evaluate_var_expression instead
                 // to enable further processing of suffix
                 // but tell it that it's non-assignable (rvalue)
-                return var_expr_evaluation::rvalue(ref.size());
+                return var_expr_eval::make_rvalue(ref.size());
             }
-            else if (name == "capacity") return var_expr_evaluation::rvalue(ref.capacity());
-            else if (name == "empty") return var_expr_evaluation::rvalue(ref.empty());
+            else if (name == "capacity") return var_expr_eval::make_rvalue(ref.capacity());
+            else if (name == "empty") return var_expr_eval::make_rvalue(ref.empty());
             else if (name == "front") return evaluate_var_expression(ref.front(), suffix.substr(b2+1));
             else if (name == "back") return evaluate_var_expression(ref.back(), suffix.substr(b2+1));
             else if (name == "pop_back") {
                 ref.pop_back();
-                return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
+                return var_expr_eval::make_void();
             }
             else if (name == "clear") {
                 ref.clear();
-                return var_expr_evaluation::no_value(var_expr_eval_result::return_void);
+                return var_expr_eval::make_void();
             }
         }
     }
     if (suffix[0] == '=') {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
-    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    return var_expr_eval_error::invalid_syntax;
 }
 
 template <class T>
-var_expr_evaluation evaluate_typed_var_expr(T*& ref, std::string const& suffix) {
+std::optional<var_expr_eval_result> evaluate_typed_var_expr(T*& ref, std::string const& suffix) {
     if (suffix[0] == '[') {
         size_t unknown_size = -1;
         return evaluate_subscript(ref, unknown_size, suffix);
@@ -675,18 +680,18 @@ var_expr_evaluation evaluate_typed_var_expr(T*& ref, std::string const& suffix) 
     if (suffix[0] == '=') {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
-    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    return var_expr_eval_error::invalid_syntax;
 }
 
 template <class T>
-var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix) {
+var_expr_eval_result evaluate_var_expression(T& ref, std::string const& suffix) {
     if (suffix.empty()) {
         // todo: create and return rvalue if ref not assignable
-        return var_expr_evaluation::lvalue(ref);
+        return var_expr_eval::make_lvalue(ref);
     }
     {
         auto ret = evaluate_typed_var_expr(ref, suffix);
-        if (ret != var_expr_eval_result::not_found) return ret;
+        if (ret) return std::move(*ret);
     }
     if (suffix[0] == '.') {
         return evaluate_var_member(ref, suffix.substr(1));
@@ -695,50 +700,54 @@ var_expr_evaluation evaluate_var_expression(T& ref, std::string const& suffix) {
         return evaluate_var_assignment(ref, suffix.substr(1));
     }
     // todo: more expressions
-    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    return var_expr_eval_error::invalid_syntax;
 }
 
-var_expr_evaluation evaluate_expression(std::string const& expr, bool for_assignment) {
-    if (expr.empty()) return var_expr_evaluation::no_value(var_expr_eval_result::not_found); // todo: what to return here?
+var_expr_eval_result evaluate_expression(std::string const& expr, bool for_assignment) {
+    if (expr.empty()) return var_expr_eval_error::invalid_syntax;
     auto ret = process_var_name_prefixes(expr,
-        std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_evaluation> {
+        std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_eval_result> {
             auto type = tunable_types::find_type_of_var(prefix);
             if (!type) return std::nullopt;
             auto ret = type->evaluate_var_expr(prefix, suffix);
-            if (ret == var_expr_eval_result::ok || ret == var_expr_eval_result::return_void) return ret;
+            if (std::holds_alternative<var_expr_eval_ptr>(ret)) return ret;
             return std::nullopt;
         })
     );
     if (ret) return std::move(*ret);
 
     auto eq = find_not_quoted(expr, '=');
-    if (eq != std::string::npos) { // create new variable
+    if (eq != std::string::npos) { // create a new variable
         auto name = expr.substr(0, eq);
-        if (name.empty()) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
-        if (!is_valid_var_name(name)) return var_expr_evaluation::no_value(var_expr_eval_result::invalid_var_name);
+        if (name.empty()) return var_expr_eval_error::invalid_syntax;
+        if (!is_valid_var_name(name)) return var_expr_eval_error::invalid_var_name;
         auto suffix = expr.substr(eq+1);
-        auto eval = evaluate_expression(suffix);
-        if (eval != var_expr_eval_result::ok) return eval;
-        return eval->create_var(name);
+        auto eval = evaluate_expression(suffix, false /* primitive types only */);
+        if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
+            auto& ptr = std::get<var_expr_eval_ptr>(eval);
+            if (!ptr) return var_expr_eval_error::void_to_value;
+            return ptr->create_var(name);
+        }
+        return eval;
     }
 
     // todo: more expressions
 
     try { // create new rvalue
-        if (is_quoted(expr)) return var_expr_evaluation::rvalue(parse_quoted_string(expr));
-        else if (is_double(expr)) return var_expr_evaluation::rvalue(std::stod(expr));
-        else if (is_integer(expr)) return var_expr_evaluation::rvalue(std::stoll(expr));
-        else if (is_bool(expr)) return var_expr_evaluation::rvalue(expr == "true");
-        else if (for_assignment) return var_expr_evaluation::rvalue(expr);
+        if (is_quoted(expr)) return var_expr_eval::make_rvalue(parse_quoted_string(expr));
+        else if (is_double(expr)) return var_expr_eval::make_rvalue(std::stod(expr));
+        else if (is_integer(expr)) return var_expr_eval::make_rvalue(std::stoll(expr));
+        else if (is_bool(expr)) return var_expr_eval::make_rvalue(expr == "true");
+        else if (for_assignment) return var_expr_eval::make_rvalue(expr);
     }
     catch (std::exception &e) {
         std::cout << "Exception: parse failed (" << e.what() << ")\n";
-        return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+        return var_expr_eval_error::invalid_syntax;
     }
     if (is_valid_var_name(expr)) { // todo: also check for things like *(v[i]->p).x
-        return var_expr_evaluation::no_value(var_expr_eval_result::undefined);
+        return var_expr_eval_error::undefined;
     }
-    return var_expr_evaluation::no_value(var_expr_eval_result::invalid_syntax);
+    return var_expr_eval_error::invalid_syntax;
 }
 
 class interaction_loop
@@ -792,8 +801,13 @@ private:
         if (s == "values") {
             for (auto &[name,_] : tunable_types::get_var_types()) {
                 auto value = evaluate_expression(name);
-                auto val_str = value->to_string();
-                if (val_str) std::cout << name << "=" << *val_str << "\n";
+                if (std::holds_alternative<var_expr_eval_ptr>(value)) {
+                    auto& ptr = std::get<var_expr_eval_ptr>(value);
+                    if (ptr) {
+                        auto val_str = ptr->to_string();
+                        if (val_str) std::cout << name << "=" << *val_str << "\n";
+                    }
+                }
             }
             return cmd_handling_result::processed;
         }
@@ -812,15 +826,19 @@ private:
     static cmd_handling_result handle_expression(std::string const& expr) {
         if (expr.empty()) return cmd_handling_result::processed;
         auto eval = evaluate_expression(expr);
-        if (eval == var_expr_eval_result::ok) {
-            auto s = eval->to_string();
-            if (s) std::cout << *s << "\n";
+
+        if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
+            auto& ptr = std::get<var_expr_eval_ptr>(eval);
+            if (ptr) {
+                auto s = ptr->to_string();
+                if (s) std::cout << *s << "\n";
+            }
             return cmd_handling_result::processed;
         }
-        if (eval == var_expr_eval_result::return_void) {
-            return cmd_handling_result::processed;
+        else if (std::holds_alternative<var_expr_eval_error>(eval)) {
+            auto& error = std::get<var_expr_eval_error>(eval);
+            std::cout << to_string(error) << "\n";
         }
-        std::cout << eval.result_str() << "\n";
         return cmd_handling_result::error;
     }
 };
