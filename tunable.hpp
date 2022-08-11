@@ -122,28 +122,6 @@ inline std::vector<std::string> split_not_quoted(std::string const& s, char deli
     return parts;
 }
 
-// process prefix parts of name split by .
-// todo: support [] -> etc.
-template <class T>
-std::optional<T> process_var_name_prefixes(std::string const& name, std::function<std::optional<T>(std::string const&,std::string const&)> func) {
-    // todo: stop on first non-quoted (and non-nested within brackets) =, +, - (but not ->), etc.
-    // it would be optimal to jump through any (), but do we even support capturing names with () inside?
-    for (size_t i=0; i<name.size(); i++) {
-        if (name[i] == '=') { // todo: fix
-            auto prefix = name.substr(0, i);
-            auto suffix = name.substr(i);
-            return func(prefix, suffix);
-        }
-        if (name[i] == '.' || name[i] == '[' || name[i] == ']' || name[i] == '-' || name[i] == '+') { // todo: handle nested brackets properly
-            auto prefix = name.substr(0, i);
-            auto suffix = name.substr(i);
-            auto ret = func(prefix, suffix);
-            if (ret.has_value()) return ret;
-        }
-    }
-    return func(name, "");
-}
-
 template <class T>
 bool from_string(T& ref, std::string const& s) {
     if constexpr(is_in_streamable<T>::value) {
@@ -223,6 +201,49 @@ std::optional<std::string> stringify(T* const& ref) {
     std::stringstream ss;
     ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(ref);
     return ss.str();
+}
+
+inline size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
+    if (i >= s.size()) return std::string::npos;
+    char open_bracket = s[i++];
+    for (size_t o=1; i<s.size(); i++) { // todo: not quoted
+        if (s[i] == open_bracket) ++o;
+        else if (s[i] == close_bracket) {
+            if (o == 0) return std::string::npos;
+            if (--o == 0) break;
+        }
+    }
+    if (i == s.size()) return std::string::npos;
+    return i;
+}
+
+inline std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket, char close_bracket, size_t i = 0) {
+    auto r = std::make_pair(std::string::npos, std::string::npos);
+    r.first = s.find(open_bracket, i);
+    r.second = find_closing_bracket(s, close_bracket, r.first);
+    return r;
+}
+
+// process prefix parts of name split by .
+// todo: support [] -> etc.
+template <class T>
+std::optional<T> process_var_name_prefixes(std::string const& name, std::function<std::optional<T>(std::string const&,std::string const&)> func) {
+    // todo: stop on first non-quoted (and non-nested within brackets) =, +, - (but not ->), etc.
+    // it would be optimal to jump through any (), but do we even support capturing names with () inside?
+    for (size_t i=0; i<name.size(); i++) {
+        if (name[i] == '=') { // todo: fix
+            auto prefix = name.substr(0, i);
+            auto suffix = name.substr(i);
+            return func(prefix, suffix);
+        }
+        if (name[i] == '.' || name[i] == '[' || name[i] == ']' || name[i] == '-' || name[i] == '+') { // todo: handle nested brackets properly
+            auto prefix = name.substr(0, i);
+            auto suffix = name.substr(i);
+            auto ret = func(prefix, suffix);
+            if (ret.has_value()) return ret;
+        }
+    }
+    return func(name, "");
 }
 
 } // helpers
@@ -539,27 +560,6 @@ private:
 
 var_expr_eval_result evaluate_expression(std::string const& expr, bool for_assignment = false);
 
-size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
-    if (i >= s.size()) return std::string::npos;
-    char open_bracket = s[i++];
-    for (size_t o=1; i<s.size(); i++) {
-        if (s[i] == open_bracket) ++o;
-        else if (s[i] == close_bracket) {
-            if (o == 0) return std::string::npos;
-            if (--o == 0) break;
-        }
-    }
-    if (i == s.size()) return std::string::npos;
-    return i;
-}
-
-std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket, char close_bracket, size_t i = 0) {
-    auto r = std::make_pair(std::string::npos, std::string::npos);
-    r.first = s.find(open_bracket, i);
-    r.second = find_closing_bracket(s, close_bracket, r.first);
-    return r;
-}
-
 template <class T>
 var_expr_eval_result evaluate_var_assignment(T& ref, std::string const &suffix) {
     auto eval = evaluate_expression(suffix, true);
@@ -703,7 +703,7 @@ var_expr_eval_result evaluate_var_expression(T& ref, std::string const& suffix) 
     return var_expr_eval_error::invalid_syntax;
 }
 
-var_expr_eval_result evaluate_expression(std::string const& expr, bool for_assignment) {
+inline var_expr_eval_result evaluate_expression(std::string const& expr, bool for_assignment) {
     if (expr.empty()) return var_expr_eval_error::invalid_syntax;
     auto ret = process_var_name_prefixes(expr,
         std::function([](std::string const& prefix, std::string const& suffix) -> std::optional<var_expr_eval_result> {
