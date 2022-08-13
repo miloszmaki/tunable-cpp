@@ -55,6 +55,9 @@ struct is_in_streamable : std::false_type {};
 template <typename T>
 struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)0)>> : std::true_type {};
 
+
+inline bool one_of(std::string const& chars, char c) { return chars.find(c) != std::string::npos; }
+
 inline bool is_quoted(std::string const& s) {
     return s.size() >= 2 && s[0]=='"' && s.back() == '"';
 }
@@ -247,6 +250,164 @@ std::optional<T> process_var_name_prefixes(std::string const& name, std::functio
 }
 
 } // helpers
+
+struct expression;
+
+struct expr_variable {
+    std::string name;
+};
+
+struct expr_constant { // number, char or string
+    std::string value;
+};
+
+struct expr_operator {
+    std::string type;
+
+    inline static const std::vector<std::string> types{
+        "==", "!=", "<=", ">=", "<<", ">>", "->", "&&", "||", "::",
+        "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
+        ".", ",", "=", "+", "-", "*", "/", "%", "&", "|", "^", "!", "<", ">", "?", ":" };
+
+    static std::string find(char const* s) {
+        if (s[0] == 0) return {};
+        char c1 = s[0], c2 = s[1];
+        for (auto &op : types) {
+            if (op[0] != c1) continue;
+            if (op.size() == 1 || op[1] == c2) return op;
+        }
+        return {};
+    }
+};
+
+struct expr_brackets {
+    std::unique_ptr<expression> nested;
+    char type; // [ ( {
+    std::string to_string() const;
+};
+
+struct expression {
+    using part = std::variant<expr_variable, expr_constant, expr_operator, expr_brackets>;
+    std::vector<part> parts;
+
+    void parse(char const* s, size_t& i);
+
+    std::string to_string() const {
+        std::string s;
+        for (auto &p : parts) {
+            if (std::holds_alternative<expr_variable>(p)) s += "name: " + std::get<expr_variable>(p).name + "\n";
+            else if (std::holds_alternative<expr_constant>(p)) s += "cnst: " + std::get<expr_constant>(p).value + "\n";
+            else if (std::holds_alternative<expr_operator>(p)) s += "op: " + std::get<expr_operator>(p).type + "\n";
+            else if (std::holds_alternative<expr_brackets>(p)) s += "b: " + std::get<expr_brackets>(p).to_string();
+        }
+        return s;
+    }
+};
+
+std::string expr_brackets::to_string() const {
+    std::string s;
+    s += type;
+    if (nested) s += nested->to_string();
+    s += type + (1 + int(type != '('));
+    return s;
+}
+
+enum class parsing_error { invalid_syntax, unmatched_bracket };
+
+struct parsing_exception : public std::exception {
+    parsing_error error;
+    size_t i = std::string::npos;
+    parsing_exception(parsing_error error, size_t i) : error(error), i(i) {}
+};
+
+void expression::parse(char const* s, size_t& i) {
+    std::regex reg_var("[_a-zA-Z][_a-zA-Z0-9]*");
+    std::regex reg_num_real("(\\d+\\.\\d*|\\.\\d+)(f|F)?");
+    std::regex reg_num_hex("0[xX][0-9a-fA-F]+");
+    std::regex reg_num_int("[-+]?\\d+");
+    std::regex reg_char("'\\\\?.'");
+    auto reg_flags = std::regex_constants::match_continuous;
+    std::cmatch cm;
+
+    for (; s[i]; i++) {
+        char const& c = s[i];
+        // end of expression
+        if (one_of(";])}", c)) break;
+        // ignore whitespace
+        if (one_of(" \t\n\r", c)) continue;
+        // brackets
+        if (one_of("[({", c)) {
+            expr_brackets p{.nested = std::make_unique<expression>(), .type = s[i]};
+            p.nested->parse(s, ++i);
+            if (!one_of("])}", s[i])) throw parsing_exception(parsing_error::unmatched_bracket, i);
+            if (p.nested->parts.empty()) p.nested.reset();
+            parts.emplace_back(std::move(p));
+            continue;
+        }
+        // variable
+        if (std::regex_search(&c, cm, reg_var, reg_flags)) {
+            size_t n = cm[0].second - &c;
+            parts.emplace_back(expr_variable{.name{&c, n}});
+            i += n - 1;
+            continue;
+        }
+        // operators
+        auto op = expr_operator::find(&c);
+        if (!op.empty()) {
+            parts.emplace_back(expr_operator{.type=op});
+            i += op.size() - 1;
+            continue;
+        }
+        // number
+        if (std::regex_search(&c, cm, reg_num_real, reg_flags) ||
+            std::regex_search(&c, cm, reg_num_hex, reg_flags) ||
+            std::regex_search(&c, cm, reg_num_int, reg_flags)) {
+            size_t n = cm[0].second - &c;
+            parts.emplace_back(expr_constant{.value{&c, n}});
+            i += n - 1;
+            continue;
+        }
+        // char
+        if (std::regex_search(&c, cm, reg_char, reg_flags)) {
+            size_t n = cm[0].second - &c;
+            parts.emplace_back(expr_constant{.value{&c, n}});
+            i += n - 1;
+            continue;
+        }
+        // string
+        if (c == '"') {
+            expr_constant p;
+            ++i;
+            bool esc = false;
+            for (; s[i] && !(!esc && s[i] == '"'); i++) {
+                p.value += s[i];
+                if (esc) esc = false;
+                else if (s[i] == '\\') esc = true;
+            }
+            if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, i);
+            parts.emplace_back(std::move(p));
+            continue;
+        }
+        throw parsing_exception(parsing_error::invalid_syntax, i);
+    }
+}
+
+std::vector<expression> parse_expressions(std::string const& s) {
+    std::vector<expression> expressions;
+    expressions.emplace_back();
+    auto cs = s.c_str();
+    size_t i = 0;
+    while (i < s.size()) {
+        auto &e = expressions.back();
+        e.parse(cs, i);
+        if (one_of("])}", cs[i])) throw parsing_exception(parsing_error::unmatched_bracket, i);
+        ++i;
+        if (!e.parts.empty()) expressions.emplace_back();
+    }
+    if (expressions.back().parts.empty()) expressions.pop_back();
+    return expressions;
+}
+
 
 // holds a reference to a tunable variable
 template <class T>
