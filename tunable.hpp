@@ -60,34 +60,28 @@ bool one_of(std::vector<T> const& v, T const& x) { return std::find(v.begin(), v
 
 inline bool one_of(std::string const& chars, char c) { return chars.find(c) != std::string::npos; }
 
+inline const std::regex reg_var{"[_a-zA-Z][_a-zA-Z0-9]*"};
+inline const std::regex reg_num_real{"[-+]?(\\d+\\.\\d*|\\.\\d+)(f|F)?"};
+inline const std::regex reg_num_hex{"0[xX][0-9a-fA-F]+"};
+inline const std::regex reg_num_int{"[-+]?\\d+"};
+inline const std::regex reg_bool("true|false");
+inline const std::regex reg_char{"'\\\\?.'"};
+
 inline bool is_quoted(std::string const& s) {
     return s.size() >= 2 && s[0]=='"' && s.back() == '"';
 }
 
 inline bool is_integer(std::string const& s) {
-    return std::regex_match(s, std::regex("[-+]?\\d+"));
+    return std::regex_match(s, reg_num_int);
 }
 
 inline bool is_hex(std::string const& s) {
-    return std::regex_match(s, std::regex("0[xX][0-9a-fA-F]+"));
+    return std::regex_match(s, reg_num_hex);
 }
 
-inline bool is_bool(std::string const& s) {
-    return s == "true" || s == "false";
-}
-
-inline bool is_double(std::string const& s) {
-    return std::regex_match(s, std::regex("[-+]?(\\d+\\.\\d*|\\.\\d+)"));
-}
-
-inline bool is_valid_var_name(std::string const& s) {
-    return std::regex_match(s, std::regex("[_a-zA-Z][_a-zA-Z0-9]*"));
-}
-
-inline std::string parse_quoted_string(std::string s) {
-    s = s.substr(1, s.size()-2);
+inline std::string unescape(std::string s) {
     static const std::vector<std::pair<std::string,std::string>> escapes{
-        {"\\\\\\\\", "\\"}, {"\\\\n", "\n"}, {"\\\\t", "\t"}, {"\\\\\"", "\""}, {"\\\\r", "\r"}};
+        {"\\\\\\\\", "\\"}, {"\\\\n", "\n"}, {"\\\\t", "\t"}, {"\\\\\"", "\""}, {"\\\\r", "\r"}, {"\\\\'", "'"}};
     for (auto &[c,r] : escapes)
         s = std::regex_replace(s, std::regex(c), r);
     return s;
@@ -142,8 +136,21 @@ bool from_string(T& ref, std::string const& s) {
 
 template <>
 bool from_string(std::string& ref, std::string const& s) {
-    if (is_quoted(s)) ref = parse_quoted_string(s);
+    if (is_quoted(s)) ref = unescape(s.substr(1, s.size()-2));
     else ref = s;
+    return true;
+}
+
+template <>
+bool from_string(char& ref, std::string const& s) {
+    if (std::regex_match(s, reg_char)) {
+        auto p = unescape(s.substr(1, s.size()-2));
+        if (p.size() != 1) return false;
+        ref = p[0];
+        return true;
+    }
+    if (s.size() != 1) return false;
+    ref = s[0];
     return true;
 }
 
@@ -237,8 +244,11 @@ struct expr_variable {
     std::string name;
 };
 
+enum class expr_const_type { empty, _int, _real, _bool, _char, _string };
+
 struct expr_constant { // number, char or string
     std::string value;
+    expr_const_type type = expr_const_type::empty;
 };
 
 struct expr_operator {
@@ -301,11 +311,6 @@ struct parsing_exception : public std::exception {
 };
 
 void expression::parse(char const* s, size_t& i) {
-    std::regex reg_var("[_a-zA-Z][_a-zA-Z0-9]*");
-    std::regex reg_num_real("(\\d+\\.\\d*|\\.\\d+)(f|F)?");
-    std::regex reg_num_hex("0[xX][0-9a-fA-F]+");
-    std::regex reg_num_int("[-+]?\\d+");
-    std::regex reg_char("'\\\\?.'");
     auto reg_flags = std::regex_constants::match_continuous;
     std::cmatch cm;
 
@@ -338,25 +343,25 @@ void expression::parse(char const* s, size_t& i) {
             i += op.size() - 1;
             continue;
         }
-        // number
-        if (std::regex_search(&c, cm, reg_num_real, reg_flags) ||
-            std::regex_search(&c, cm, reg_num_hex, reg_flags) ||
-            std::regex_search(&c, cm, reg_num_int, reg_flags)) {
+        auto create_const = [&](std::regex const& reg, expr_const_type type) {
+            if (!std::regex_search(&c, cm, reg, reg_flags)) return false;
             size_t n = cm[0].second - &c;
-            parts.emplace_back(expr_constant{.value{&c, n}});
+            parts.emplace_back(expr_constant{.value{&c, n}, .type=type});
             i += n - 1;
-            continue;
-        }
+            return true;
+        };
+        // real number
+        if (create_const(reg_num_real, expr_const_type::_real)) continue;
+        // integer number
+        if (create_const(reg_num_int, expr_const_type::_int)) continue;
+        if (create_const(reg_num_hex, expr_const_type::_int)) continue;
+        // bool
+        if (create_const(reg_bool, expr_const_type::_bool)) continue;
         // char
-        if (std::regex_search(&c, cm, reg_char, reg_flags)) {
-            size_t n = cm[0].second - &c;
-            parts.emplace_back(expr_constant{.value{&c, n}});
-            i += n - 1;
-            continue;
-        }
+        if (create_const(reg_char, expr_const_type::_char)) continue;
         // string
         if (c == '"') {
-            expr_constant p;
+            expr_constant p{.type=expr_const_type::_string};
             ++i;
             bool esc = false;
             for (; s[i] && !(!esc && s[i] == '"'); i++) {
@@ -364,7 +369,8 @@ void expression::parse(char const* s, size_t& i) {
                 if (esc) esc = false;
                 else if (s[i] == '\\') esc = true;
             }
-            if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, i);
+            if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, i); // end of string without closing quote
+            p.value = unescape(p.value);
             parts.emplace_back(std::move(p));
             continue;
         }
@@ -467,6 +473,11 @@ public:
 
     template <class T> static std::unique_ptr<var_expr_eval> make_rvalue(T const& ref) { return make_rvalue(ref, false); }
     template <class T> static std::unique_ptr<var_expr_eval> make_rvalue(T* const& ref) { return make_rvalue(ref, true); }
+    template <class T> static std::unique_ptr<var_expr_eval> make_rvalue_from_string(std::string const& s) {
+        T x;
+        if (!from_string(x, s)) throw std::runtime_error("deserialization");
+        return make_rvalue(x);
+    }
 
     static std::unique_ptr<var_expr_eval> make_void() { return {}; }
 
@@ -913,16 +924,14 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
     if (ret) return std::move(*ret);
 
     auto &part = expr.parts[part_idx];
-    if (std::holds_alternative<expr_variable>(part)) {
+    if (std::holds_alternative<expr_variable>(part)) { // we've got an undefined variable
         auto &var = std::get<expr_variable>(part);
-        if (!is_valid_var_name(var.name)) return var_expr_eval_error::invalid_var_name;
-        if (expr.parts.size() == 1) return var_expr_eval_error::undefined;
+        if (expr.parts.size() == 1) return var_expr_eval_error::undefined; // nothing more, so return an error
 
         auto &part2 = expr.parts[part_idx + 1];
         if (std::holds_alternative<expr_operator>(part2)) {
             auto &op = std::get<expr_operator>(part2).type;
-            if (op == "=") {
-                // create a new variable
+            if (op == "=") { // create a new variable
                 auto eval = evaluate_expression(expr, part_idx + 2, false /* primitive types only */);
                 if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
                     auto& ptr = std::get<var_expr_eval_ptr>(eval);
@@ -937,12 +946,14 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
     else if (std::holds_alternative<expr_constant>(part)) {
         auto cnst = std::get<expr_constant>(part);
         try { // create new rvalue
-            // todo: type could be saved when parsing expr_constant
-            if (is_quoted(cnst.value)) return var_expr_eval::make_rvalue(parse_quoted_string(cnst.value));
-            else if (is_double(cnst.value)) return var_expr_eval::make_rvalue(std::stod(cnst.value));
-            else if (is_integer(cnst.value)) return var_expr_eval::make_rvalue(std::stoll(cnst.value));
-            else if (is_bool(cnst.value)) return var_expr_eval::make_rvalue(cnst.value == "true");
-            else if (for_assignment) return var_expr_eval::make_rvalue(cnst.value);
+            switch(cnst.type) {
+                case expr_const_type::_int: return var_expr_eval::make_rvalue_from_string<long long>(cnst.value);
+                case expr_const_type::_real: return var_expr_eval::make_rvalue_from_string<double>(cnst.value);
+                case expr_const_type::_bool: return var_expr_eval::make_rvalue_from_string<bool>(cnst.value);
+                case expr_const_type::_char: return var_expr_eval::make_rvalue_from_string<char>(cnst.value);
+                case expr_const_type::_string: return var_expr_eval::make_rvalue_from_string<std::string>(cnst.value);
+            }
+            if (for_assignment) return var_expr_eval::make_rvalue(cnst.value);
         }
         catch (std::exception &e) {
             std::cout << "Exception: parse failed (" << e.what() << ")\n";
