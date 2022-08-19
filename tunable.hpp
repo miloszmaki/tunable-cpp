@@ -275,10 +275,10 @@ struct expression {
     std::string to_string() const {
         std::string s;
         for (auto &p : parts) {
-            if (std::holds_alternative<expr_variable>(p)) s += "name: " + std::get<expr_variable>(p).name + "\n";
-            else if (std::holds_alternative<expr_constant>(p)) s += "cnst: " + std::get<expr_constant>(p).value + "\n";
-            else if (std::holds_alternative<expr_operator>(p)) s += "op: " + std::get<expr_operator>(p).type + "\n";
-            else if (std::holds_alternative<expr_brackets>(p)) s += "b: " + std::get<expr_brackets>(p).to_string();
+            if (std::holds_alternative<expr_variable>(p)) s += std::get<expr_variable>(p).name;
+            else if (std::holds_alternative<expr_constant>(p)) s += std::get<expr_constant>(p).value;
+            else if (std::holds_alternative<expr_operator>(p)) s += std::get<expr_operator>(p).type;
+            else if (std::holds_alternative<expr_brackets>(p)) s += std::get<expr_brackets>(p).to_string();
         }
         return s;
     }
