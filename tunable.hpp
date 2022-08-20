@@ -98,40 +98,6 @@ inline std::string unescape(std::string s) {
     return s;
 }
 
-// find first position of c in s (but not within "..."), starting at pos
-// use quoted=true to search only within "..."
-inline size_t find_not_quoted(std::string const& s, char c, size_t pos = 0, bool quoted = false) {
-    for (; pos < s.size(); pos++) {
-        if (s[pos] == '"' && (pos == 0 || s[pos-1] != '\\')) quoted = !quoted;
-        else if (s[pos] == c && !quoted) return pos;
-    }
-    return std::string::npos;
-}
-
-// split s with delimiter
-inline std::vector<std::string> split(std::string const& s, char delimiter) {
-    size_t last = 0, next = 0;
-    std::vector<std::string> parts;
-    while ((next = s.find(delimiter, last)) != std::string::npos) {
-        parts.emplace_back(s.substr(last, next-last));
-        last = next + 1;
-    }
-    parts.emplace_back(s.substr(last));
-    return parts;
-}
-
-// split s by delimiter (which is not within "...")
-inline std::vector<std::string> split_not_quoted(std::string const& s, char delimiter) {
-    size_t last = 0, next = 0;
-    std::vector<std::string> parts;
-    while ((next = find_not_quoted(s, delimiter, last)) != std::string::npos) {
-        parts.emplace_back(s.substr(last, next-last));
-        last = next + 1;
-    }
-    parts.emplace_back(s.substr(last));
-    return parts;
-}
-
 template <class T>
 bool from_string(T& ref, std::string const& s) {
     if constexpr(is_in_streamable<T>::value) {
