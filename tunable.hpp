@@ -66,6 +66,7 @@ inline const std::regex reg_num_hex{"0[xX][0-9a-fA-F]+"};
 inline const std::regex reg_num_int{"[-+]?\\d+"};
 inline const std::regex reg_bool("true|false");
 inline const std::regex reg_char{"'\\\\?.'"};
+inline const std::regex reg_nullptr{"nullptr"};
 
 inline bool is_quoted(std::string const& s) {
     return s.size() >= 2 && s[0]=='"' && s.back() == '"';
@@ -221,7 +222,7 @@ struct expr_variable {
     std::string name;
 };
 
-enum class expr_const_type { empty, _int, _real, _bool, _char, _string };
+enum class expr_const_type { empty, _int, _real, _bool, _char, _string, _nullptr };
 
 struct expr_constant { // number, char or string
     std::string value;
@@ -306,20 +307,14 @@ void expression::parse(char const* s, size_t& i) {
             parts.emplace_back(std::move(p));
             continue;
         }
-        // variable
-        if (std::regex_search(&c, cm, reg_var, reg_flags)) {
-            size_t n = cm[0].second - &c;
-            parts.emplace_back(expr_variable{.name{&c, n}});
-            i += n - 1;
-            continue;
-        }
-        // operators
+        // operator
         auto op = expr_operator::find(&c);
         if (!op.empty()) {
             parts.emplace_back(expr_operator{.type=op});
             i += op.size() - 1;
             continue;
         }
+        // constant
         auto create_const = [&](std::regex const& reg, expr_const_type type) {
             if (!std::regex_search(&c, cm, reg, reg_flags)) return false;
             size_t n = cm[0].second - &c;
@@ -327,6 +322,8 @@ void expression::parse(char const* s, size_t& i) {
             i += n - 1;
             return true;
         };
+        // nullptr
+        if (create_const(reg_nullptr, expr_const_type::_nullptr)) continue;
         // real number
         if (create_const(reg_num_real, expr_const_type::_real)) continue;
         // integer number
@@ -349,6 +346,13 @@ void expression::parse(char const* s, size_t& i) {
             if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, i); // end of string without closing quote
             p.value = unescape(p.value);
             parts.emplace_back(std::move(p));
+            continue;
+        }
+        // variable
+        if (std::regex_search(&c, cm, reg_var, reg_flags)) {
+            size_t n = cm[0].second - &c;
+            parts.emplace_back(expr_variable{.name{&c, n}});
+            i += n - 1;
             continue;
         }
         throw parsing_exception(parsing_error::invalid_syntax, i);
@@ -717,11 +721,11 @@ private:
 };
 
 
-var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx, bool for_assignment = false);
+var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx);
 
 template <class T>
 var_expr_eval_result evaluate_var_assignment(T& ref, expression const &expr, size_t part_idx) {
-    auto eval = evaluate_expression(expr, part_idx, true);
+    auto eval = evaluate_expression(expr, part_idx);
     if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
     auto& ptr = std::get<var_expr_eval_ptr>(eval);
     if (!ptr || !ptr->assign_to(ref)) return var_expr_eval_error::bad_value_assign;
@@ -887,7 +891,7 @@ var_expr_eval_result evaluate_var_expression(T& ref, expression const& expr, siz
     return var_expr_eval_error::invalid_syntax;
 }
 
-inline var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx, bool for_assignment) {
+inline var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx) {
     if (expr.parts.empty()) return var_expr_eval_error::invalid_syntax;
     auto ret = process_var_name_prefixes(expr, part_idx,
         std::function([&expr](std::string const& prefix, size_t suffix_idx) -> std::optional<var_expr_eval_result> {
@@ -909,7 +913,7 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
         if (std::holds_alternative<expr_operator>(part2)) {
             auto &op = std::get<expr_operator>(part2).type;
             if (op == "=") { // create a new variable
-                auto eval = evaluate_expression(expr, part_idx + 2, false /* primitive types only */);
+                auto eval = evaluate_expression(expr, part_idx + 2);
                 if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
                     auto& ptr = std::get<var_expr_eval_ptr>(eval);
                     if (!ptr) return var_expr_eval_error::void_to_value;
@@ -929,8 +933,8 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
                 case expr_const_type::_bool: return var_expr_eval::make_rvalue_from_string<bool>(cnst.value);
                 case expr_const_type::_char: return var_expr_eval::make_rvalue_from_string<char>(cnst.value);
                 case expr_const_type::_string: return var_expr_eval::make_rvalue_from_string<std::string>(cnst.value);
+                case expr_const_type::_nullptr: return var_expr_eval::make_rvalue(nullptr);
             }
-            if (for_assignment) return var_expr_eval::make_rvalue(cnst.value);
         }
         catch (std::exception &e) {
             std::cout << "Exception: parse failed (" << e.what() << ")\n";
