@@ -153,7 +153,7 @@ bool from_string(bool& ref, std::string const& s) {
 
 template <class T>
 bool from_string(T*& ref, std::string const& s) {
-    if (s == "nullptr" || s == "NULL") {
+    if (s == "nullptr") {
         ref = nullptr;
         return true;
     }
@@ -185,27 +185,6 @@ std::optional<std::string> stringify(T* const& ref) {
     std::stringstream ss;
     ss << "0x" << std::hex << reinterpret_cast<uintptr_t>(ref);
     return ss.str();
-}
-
-inline size_t find_closing_bracket(std::string const& s, char close_bracket, size_t i = 0) {
-    if (i >= s.size()) return std::string::npos;
-    char open_bracket = s[i++];
-    for (size_t o=1; i<s.size(); i++) { // todo: not quoted
-        if (s[i] == open_bracket) ++o;
-        else if (s[i] == close_bracket) {
-            if (o == 0) return std::string::npos;
-            if (--o == 0) break;
-        }
-    }
-    if (i == s.size()) return std::string::npos;
-    return i;
-}
-
-inline std::pair<size_t, size_t> find_brackets(std::string const& s, char open_bracket, char close_bracket, size_t i = 0) {
-    auto r = std::make_pair(std::string::npos, std::string::npos);
-    r.first = s.find(open_bracket, i);
-    r.second = find_closing_bracket(s, close_bracket, r.first);
-    return r;
 }
 
 } // helpers
