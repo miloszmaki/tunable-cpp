@@ -63,21 +63,25 @@ inline bool one_of(std::string const& chars, char c) { return chars.find(c) != s
 inline const std::regex reg_var{"[_a-zA-Z][_a-zA-Z0-9]*"};
 inline const std::regex reg_num_real{"[-+]?(\\d+\\.\\d*|\\.\\d+)(f|F)?"};
 inline const std::regex reg_num_hex{"0[xX][0-9a-fA-F]+"};
-inline const std::regex reg_num_int{"[-+]?\\d+"};
-inline const std::regex reg_bool("true|false");
+inline const std::regex reg_num_dec{"[-+]?\\d+"};
+inline const std::regex reg_bool("(true|false)\\b");
 inline const std::regex reg_char{"'\\\\?.'"};
-inline const std::regex reg_nullptr{"nullptr"};
+inline const std::regex reg_nullptr{"nullptr\\b"};
 
 inline bool is_quoted(std::string const& s) {
     return s.size() >= 2 && s[0]=='"' && s.back() == '"';
 }
 
-inline bool is_integer(std::string const& s) {
-    return std::regex_match(s, reg_num_int);
+inline bool is_decimal(std::string const& s) {
+    return std::regex_match(s, reg_num_dec);
 }
 
 inline bool is_hex(std::string const& s) {
     return std::regex_match(s, reg_num_hex);
+}
+
+inline bool is_integer(std::string const& s) {
+    return is_decimal(s) || is_hex(s);
 }
 
 inline std::string unescape(std::string s) {
@@ -103,6 +107,7 @@ template <class T>
 bool from_string(T& ref, std::string const& s) {
     if constexpr(is_in_streamable<T>::value) {
         std::stringstream ss(s);
+        if (is_hex(s)) ss >> std::hex;
         ss >> ref;
         return true;
     }
@@ -133,18 +138,11 @@ bool from_string(char& ref, std::string const& s) {
 }
 
 template <>
-bool from_string(size_t& ref, std::string const& s) {
-    if (!is_integer(s)) return false;
-    std::stringstream ss(s);
-    ss >> ref;
-    return true;
-}
-
-template <>
 bool from_string(bool& ref, std::string const& s) {
     if (is_integer(s)) {
-        std::stringstream ss(s);
-        ss >> ref;
+        long long i;
+        if (!from_string(i, s)) return false;
+        ref = i != 0;
         return true;
     }
     if (s == "true") ref = true;
@@ -159,12 +157,8 @@ bool from_string(T*& ref, std::string const& s) {
         ref = nullptr;
         return true;
     }
-    bool hex = is_hex(s);
-    if (!hex && !is_integer(s)) return false;
-    std::stringstream ss(s);
-    if (hex) ss >> std::hex;
-    ss >> reinterpret_cast<size_t&>(ref);
-    return true;
+    if (!is_integer(s)) return false;
+    return from_string(reinterpret_cast<unsigned long long&>(ref), s);
 }
 
 template <class T>
@@ -327,8 +321,8 @@ void expression::parse(char const* s, size_t& i) {
         // real number
         if (create_const(reg_num_real, expr_const_type::_real)) continue;
         // integer number
-        if (create_const(reg_num_int, expr_const_type::_int)) continue;
         if (create_const(reg_num_hex, expr_const_type::_int)) continue;
+        if (create_const(reg_num_dec, expr_const_type::_int)) continue;
         // bool
         if (create_const(reg_bool, expr_const_type::_bool)) continue;
         // char
@@ -761,7 +755,7 @@ var_expr_eval_result evaluate_subscript(T& ref, size_t size, expression const& e
     auto str = idx_ptr->to_string();
     if (!str) return var_expr_eval_error::invalid_syntax;
     size_t idx = -1;
-    if (!from_string(idx, *str)) return var_expr_eval_error::invalid_syntax;
+    if (!is_integer(*str) || !from_string(idx, *str)) return var_expr_eval_error::invalid_syntax;
     if (idx >= size) return var_expr_eval_error::idx_out_of_bounds;
     return evaluate_var_expression(ref[idx], outer_expr, outer_next_part_idx);
 }
@@ -807,7 +801,9 @@ std::optional<var_expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref,
                                 // todo: support multiple arguments
                                 auto s = ptr->to_string();
                                 if (s && is_integer(*s)) {
-                                    ref.resize(std::stoll(*s));
+                                    size_t size;
+                                    from_string(size, *s);
+                                    ref.resize(size);
                                     return var_expr_eval::make_void();
                                 }
                                 return var_expr_eval_error::invalid_syntax;
