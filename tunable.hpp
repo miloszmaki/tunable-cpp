@@ -80,10 +80,21 @@ inline bool is_hex(std::string const& s) {
 }
 
 inline std::string unescape(std::string s) {
-    static const std::vector<std::pair<std::string,std::string>> escapes{
-        {"\\\\\\\\", "\\"}, {"\\\\n", "\n"}, {"\\\\t", "\t"}, {"\\\\\"", "\""}, {"\\\\r", "\r"}, {"\\\\'", "'"}};
-    for (auto &[c,r] : escapes)
-        s = std::regex_replace(s, std::regex(c), r);
+    static const std::map<char, char> escapes{
+        {'n', '\n'}, {'t', '\t'}, {'v', '\v'}, {'b', '\b'},
+        {'r', '\r'}, {'f', '\f'}, {'a', '\a'}, {'0', '\0'}};
+    bool esc = false;
+    size_t t = 0;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '\\') { esc = true; continue; }
+        if (esc) {
+            esc = false;
+            auto it = escapes.find(s[i]);
+            if (it != escapes.end()) { s[t++] = it->second; continue; }
+        }
+        s[t++] = s[i];
+    }
+    s.resize(t);
     return s;
 }
 
