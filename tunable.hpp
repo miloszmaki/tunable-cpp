@@ -233,9 +233,10 @@ struct expression {
 
     void parse(char const* s, size_t& i);
 
-    std::string to_string() const {
+    std::string to_string(size_t begin_idx = 0, size_t end_idx = -1) const {
         std::string s;
-        for (auto &p : parts) {
+        for (size_t i = begin_idx; i < end_idx && i < parts.size(); i++) {
+            auto &p = parts[i];
             if (std::holds_alternative<expr_variable>(p)) s += std::get<expr_variable>(p).name;
             else if (std::holds_alternative<expr_constant>(p)) s += std::get<expr_constant>(p).value;
             else if (std::holds_alternative<expr_operator>(p)) s += std::get<expr_operator>(p).type;
@@ -256,9 +257,24 @@ std::string expr_brackets::to_string() const {
 enum class parsing_error { invalid_syntax, unmatched_bracket };
 
 struct parsing_exception : public std::exception {
-    parsing_error error;
-    size_t i = std::string::npos;
-    parsing_exception(parsing_error error, size_t i) : error(error), i(i) {}
+    parsing_exception(parsing_error error, char const* str, size_t pos) {
+        static const std::map<parsing_error, std::string> errors{
+            {parsing_error::invalid_syntax, "invalid syntax"},
+            {parsing_error::unmatched_bracket, "unmatched_bracket"}
+        };
+
+        std::string indent(pos, ' ');
+        std::string marker = "^";
+
+        msg = errors.at(error) + "\n" +
+              str + "\n" +
+              indent + marker + "\n";
+    }
+
+    virtual const char* what() const noexcept { return msg.c_str(); }
+
+private:
+    std::string msg;
 };
 
 void expression::parse(char const* s, size_t& i) {
@@ -273,9 +289,10 @@ void expression::parse(char const* s, size_t& i) {
         if (one_of(" \t\n\r", c)) continue;
         // brackets
         if (one_of("[({", c)) {
+            const int i0 = i;
             expr_brackets p{.nested = std::make_unique<expression>(), .type = s[i]};
             p.nested->parse(s, ++i);
-            if (!one_of("])}", s[i])) throw parsing_exception(parsing_error::unmatched_bracket, i);
+            if (!one_of("])}", s[i])) throw parsing_exception(parsing_error::unmatched_bracket, s, i0);
             if (p.nested->parts.empty()) p.nested.reset();
             parts.emplace_back(std::move(p));
             continue;
@@ -316,7 +333,7 @@ void expression::parse(char const* s, size_t& i) {
                 if (esc) esc = false;
                 else if (s[i] == '\\') esc = true;
             }
-            if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, i); // end of string without closing quote
+            if (!s[i]) throw parsing_exception(parsing_error::invalid_syntax, s, i); // end of string without closing quote
             p.value = unescape(p.value);
             parts.emplace_back(std::move(p));
             continue;
@@ -328,7 +345,7 @@ void expression::parse(char const* s, size_t& i) {
             i += n - 1;
             continue;
         }
-        throw parsing_exception(parsing_error::invalid_syntax, i);
+        throw parsing_exception(parsing_error::invalid_syntax, s, i);
     }
 }
 
@@ -340,7 +357,7 @@ std::vector<expression> parse_expressions(std::string const& s) {
     while (i < s.size()) {
         auto &e = expressions.back();
         e.parse(cs, i);
-        if (one_of("])}", cs[i])) throw parsing_exception(parsing_error::unmatched_bracket, i);
+        if (one_of("])}", cs[i])) throw parsing_exception(parsing_error::unmatched_bracket, cs, i);
         ++i;
         if (!e.parts.empty()) expressions.emplace_back();
     }
@@ -396,19 +413,34 @@ private:
     void remove_from_type(std::string const& name);
 };
 
-enum class var_expr_eval_error { invalid_syntax, undefined, void_to_value, bad_value_assign, invalid_var_name, idx_out_of_bounds };
+enum class expr_eval_error { invalid_syntax, undefined, void_to_value, bad_value_assign, invalid_var_name, idx_out_of_bounds };
 
-std::string to_string(var_expr_eval_error e) {
-    static const std::map<var_expr_eval_error, std::string> errors{
-        {var_expr_eval_error::invalid_syntax, "invalid syntax"},
-        {var_expr_eval_error::undefined, "undefined"},
-        {var_expr_eval_error::void_to_value, "void cannot be converted to value"},
-        {var_expr_eval_error::bad_value_assign, "bad value assignment"},
-        {var_expr_eval_error::invalid_var_name, "invalid variable name"},
-        {var_expr_eval_error::idx_out_of_bounds, "index out of bounds"}
-    };
-    return errors.at(e);
-}
+struct expr_eval_exception : public std::exception {
+    expr_eval_exception(expr_eval_error error, expression const& expr, size_t part_idx) {
+        static const std::map<expr_eval_error, std::string> errors{
+            {expr_eval_error::invalid_syntax, "invalid syntax"},
+            {expr_eval_error::undefined, "undefined"},
+            {expr_eval_error::void_to_value, "void cannot be converted to value"},
+            {expr_eval_error::bad_value_assign, "bad value assignment"},
+            {expr_eval_error::invalid_var_name, "invalid variable name"},
+            {expr_eval_error::idx_out_of_bounds, "index out of bounds"}
+        };
+
+        auto prefix = expr.to_string(0, part_idx);
+        auto suffix = expr.to_string(part_idx);
+        std::string indent(prefix.size(), ' ');
+        std::string marker(expr.to_string(part_idx, part_idx+1).size(), '^');
+
+        msg = errors.at(error) + "\n" +
+              prefix + suffix + "\n" +
+              indent + marker + "\n";
+    }
+
+    virtual const char* what() const noexcept { return msg.c_str(); }
+
+private:
+    std::string msg;
+};
 
 class var_expr_eval {
 public:
@@ -516,16 +548,14 @@ std::unique_ptr<var_expr_eval> var_expr_eval::make_rvalue(T const& ref, bool is_
 
 using var_expr_eval_ptr = std::unique_ptr<var_expr_eval>;
 
-using var_expr_eval_result = std::variant<var_expr_eval_ptr, var_expr_eval_error>;
-
 template <class T>
-var_expr_eval_result evaluate_var_expression(T& ref, expression const& expr, size_t part_idx);
+var_expr_eval_ptr evaluate_var_expression(T& ref, expression const& expr, size_t part_idx);
 
 // interface for variable search and assignment
 class tunable_type_base {
 public:
     virtual ~tunable_type_base() {}
-    virtual var_expr_eval_result evaluate_var_expr(std::string const& name, expression const& expr, size_t part_idx) = 0;
+    virtual std::optional<var_expr_eval_ptr> evaluate_var_expr(std::string const& name, expression const& expr, size_t part_idx) = 0;
 };
 
 // holds a mapping from the variable names to their types
@@ -565,10 +595,10 @@ private:
 template <class T>
 class tunable_type : public tunable_type_base {
 public:
-    virtual var_expr_eval_result evaluate_var_expr(std::string const& name, expression const& expr, size_t part_idx) {
+    virtual std::optional<var_expr_eval_ptr> evaluate_var_expr(std::string const& name, expression const& expr, size_t part_idx) {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
-        if (!var) return var_expr_eval_error::undefined;
+        if (!var) return std::nullopt;
         return evaluate_var_expression(var->ref, expr, part_idx);
     }
 private:
@@ -623,7 +653,7 @@ template <class T>
 class member_var_base_typed : public member_var_base {
 public:
     virtual ~member_var_base_typed() {}
-    virtual var_expr_eval_result evaluate_expression(T& ref, expression const& expr, size_t part_idx) = 0;
+    virtual var_expr_eval_ptr evaluate_expression(T& ref, expression const& expr, size_t part_idx) = 0;
 };
 
 // holds all tunable members for a given class
@@ -666,7 +696,7 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    virtual var_expr_eval_result evaluate_expression(T& ref, expression const& expr, size_t part_idx) {
+    virtual var_expr_eval_ptr evaluate_expression(T& ref, expression const& expr, size_t part_idx) {
         auto& member_ref = get_ref(ref);
         return evaluate_var_expression(member_ref, expr, part_idx);
     }
@@ -694,53 +724,47 @@ private:
 };
 
 
-var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx);
+var_expr_eval_ptr evaluate_expression(expression const& expr, size_t part_idx);
 
 template <class T>
-var_expr_eval_result evaluate_var_assignment(T& ref, expression const &expr, size_t part_idx) {
+var_expr_eval_ptr evaluate_var_assignment(T& ref, expression const &expr, size_t part_idx) {
     auto eval = evaluate_expression(expr, part_idx);
-    if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
-    auto& ptr = std::get<var_expr_eval_ptr>(eval);
-    if (!ptr || !ptr->assign_to(ref)) return var_expr_eval_error::bad_value_assign;
+    if (!eval || !eval->assign_to(ref)) throw expr_eval_exception(expr_eval_error::bad_value_assign, expr, part_idx);
     return var_expr_eval::make_lvalue(ref);
 }
 
 template <class T>
-var_expr_eval_result evaluate_var_member(T& ref, expression const &expr, size_t part_idx) {
+var_expr_eval_ptr evaluate_var_member(T& ref, expression const &expr, size_t part_idx) {
     auto ret = process_var_name_prefixes(expr, part_idx,
-        std::function([&](std::string const& prefix, size_t suffix_idx) -> std::optional<var_expr_eval_result> {
+        std::function([&](std::string const& prefix, size_t suffix_idx) -> std::optional<var_expr_eval_ptr> {
             auto var = member_vars<T>::find_member(prefix);
             if (!var) return std::nullopt;
-            auto ret = var->evaluate_expression(ref, expr, suffix_idx);
-            if (std::holds_alternative<var_expr_eval_ptr>(ret)) return ret;
-            return std::nullopt;
+            return var->evaluate_expression(ref, expr, suffix_idx);
         })
     );
     if (ret) return std::move(*ret);
-    return var_expr_eval_error::undefined;
+    throw expr_eval_exception(expr_eval_error::undefined, expr, part_idx);
 }
 
 template <class T>
-std::optional<var_expr_eval_result> evaluate_typed_var_expr(T& ref, expression const& expr, size_t part_idx) {
+std::optional<var_expr_eval_ptr> evaluate_typed_var_expr(T& ref, expression const& expr, size_t part_idx) {
     return std::nullopt;
 }
 
 template <class T>
-var_expr_eval_result evaluate_subscript(T& ref, size_t size, expression const& expr, expression const& outer_expr, size_t outer_next_part_idx) {
+var_expr_eval_ptr evaluate_subscript(T& ref, size_t size, expression const& expr, expression const& outer_expr, size_t outer_next_part_idx) {
     auto idx_eval = evaluate_expression(expr, 0);
-    if (!std::holds_alternative<var_expr_eval_ptr>(idx_eval)) return idx_eval;
-    auto& idx_ptr = std::get<var_expr_eval_ptr>(idx_eval);
-    if (!idx_ptr) return var_expr_eval_error::void_to_value;
-    auto str = idx_ptr->to_string();
-    if (!str) return var_expr_eval_error::invalid_syntax;
+    if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
+    auto str = idx_eval->to_string();
+    if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
     size_t idx = -1;
-    if (!is_integer(*str) || !from_string(idx, *str)) return var_expr_eval_error::invalid_syntax;
-    if (idx >= size) return var_expr_eval_error::idx_out_of_bounds;
+    if (!is_integer(*str) || !from_string(idx, *str)) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+    if (idx >= size) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
     return evaluate_var_expression(ref[idx], outer_expr, outer_next_part_idx);
 }
 
 template <class T>
-std::optional<var_expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, expression const& expr, size_t part_idx) {
+std::optional<var_expr_eval_ptr> evaluate_typed_var_expr(std::vector<T>& ref, expression const& expr, size_t part_idx) {
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_brackets>(part)) {
         auto &brackets = std::get<expr_brackets>(part);
@@ -763,29 +787,25 @@ std::optional<var_expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref,
                             // methods with arguments
                             if (method.name == "push_back") {
                                 auto eval = evaluate_expression(*args.nested, 0);
-                                if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
-                                auto& ptr = std::get<var_expr_eval_ptr>(eval);
-                                if (!ptr) return var_expr_eval_error::void_to_value;
-                                if (ptr->is<T>()) {
-                                    ref.push_back(ptr->value<T>());
+                                if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
+                                if (eval->is<T>()) {
+                                    ref.push_back(eval->value<T>());
                                     return var_expr_eval::make_void();
                                 }
-                                return var_expr_eval_error::invalid_syntax;
+                                throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                             }
                             else if (method.name == "resize") {
                                 auto eval = evaluate_expression(*args.nested, 0);
-                                if (!std::holds_alternative<var_expr_eval_ptr>(eval)) return eval;
-                                auto& ptr = std::get<var_expr_eval_ptr>(eval);
-                                if (!ptr) return var_expr_eval_error::void_to_value;
+                                if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                                 // todo: support multiple arguments
-                                auto s = ptr->to_string();
+                                auto s = eval->to_string();
                                 if (s && is_integer(*s)) {
                                     size_t size;
                                     from_string(size, *s);
                                     ref.resize(size);
                                     return var_expr_eval::make_void();
                                 }
-                                return var_expr_eval_error::invalid_syntax;
+                                throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                             }
                         }
                         else {
@@ -817,11 +837,11 @@ std::optional<var_expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref,
             return evaluate_var_assignment(ref, expr, part_idx + 1);
         }
     }
-    return var_expr_eval_error::invalid_syntax;
+    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
 }
 
 template <class T>
-std::optional<var_expr_eval_result> evaluate_typed_var_expr(T*& ref, expression const& expr, size_t part_idx) {
+std::optional<var_expr_eval_ptr> evaluate_typed_var_expr(T*& ref, expression const& expr, size_t part_idx) {
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_operator>(part)) {
         auto &op = std::get<expr_operator>(part).type;
@@ -839,11 +859,11 @@ std::optional<var_expr_eval_result> evaluate_typed_var_expr(T*& ref, expression 
             return evaluate_subscript(ref, unknown_size, *brackets.nested, expr, part_idx + 1);
         }
     }
-    return var_expr_eval_error::invalid_syntax;
+    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
 }
 
 template <class T>
-var_expr_eval_result evaluate_var_expression(T& ref, expression const& expr, size_t part_idx) {
+var_expr_eval_ptr evaluate_var_expression(T& ref, expression const& expr, size_t part_idx) {
     if (part_idx >= expr.parts.size()) {
         // todo: create and return rvalue if ref not assignable
         return var_expr_eval::make_lvalue(ref);
@@ -863,18 +883,16 @@ var_expr_eval_result evaluate_var_expression(T& ref, expression const& expr, siz
         }
     }
     // todo: more expressions
-    return var_expr_eval_error::invalid_syntax;
+    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
 }
 
-inline var_expr_eval_result evaluate_expression(expression const& expr, size_t part_idx) {
-    if (expr.parts.empty()) return var_expr_eval_error::invalid_syntax;
+inline var_expr_eval_ptr evaluate_expression(expression const& expr, size_t part_idx) {
+    if (expr.parts.empty()) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
     auto ret = process_var_name_prefixes(expr, part_idx,
-        std::function([&expr](std::string const& prefix, size_t suffix_idx) -> std::optional<var_expr_eval_result> {
+        std::function([&expr](std::string const& prefix, size_t suffix_idx) -> std::optional<var_expr_eval_ptr> {
             auto type = tunable_types::find_type_of_var(prefix);
             if (!type) return std::nullopt;
-            auto ret = type->evaluate_var_expr(prefix, expr, suffix_idx);
-            if (std::holds_alternative<var_expr_eval_ptr>(ret)) return ret;
-            return std::nullopt;
+            return type->evaluate_var_expr(prefix, expr, suffix_idx);
         })
     );
     if (ret) return std::move(*ret);
@@ -882,22 +900,18 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_variable>(part)) { // we've got an undefined variable
         auto &var = std::get<expr_variable>(part);
-        if (expr.parts.size() == 1) return var_expr_eval_error::undefined; // nothing more, so return an error
+        if (expr.parts.size() == 1) throw expr_eval_exception(expr_eval_error::undefined, expr, part_idx); // nothing more, so return an error
 
         auto &part2 = expr.parts[part_idx + 1];
         if (std::holds_alternative<expr_operator>(part2)) {
             auto &op = std::get<expr_operator>(part2).type;
             if (op == "=") { // create a new variable
                 auto eval = evaluate_expression(expr, part_idx + 2);
-                if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
-                    auto& ptr = std::get<var_expr_eval_ptr>(eval);
-                    if (!ptr) return var_expr_eval_error::void_to_value;
-                    return ptr->create_var(var.name);
-                }
-                return eval;
+                if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, part_idx + 2);
+                return eval->create_var(var.name);
             }
         }
-        return var_expr_eval_error::invalid_syntax;
+        throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
     }
     else if (std::holds_alternative<expr_constant>(part)) {
         auto cnst = std::get<expr_constant>(part);
@@ -913,13 +927,13 @@ inline var_expr_eval_result evaluate_expression(expression const& expr, size_t p
         }
         catch (std::exception &e) {
             std::cout << "Exception: parse failed (" << e.what() << ")\n";
-            return var_expr_eval_error::invalid_syntax;
+            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
         }
     }
 
     // todo: more expressions
 
-    return var_expr_eval_error::invalid_syntax;
+    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
 }
 
 class interaction_loop
@@ -932,15 +946,26 @@ public:
             std::cout << "$ ";
             std::string s;
             std::getline(std::cin, s);
-            auto result = handle_command(s);
-            if (result == cmd_handling_result::exit) break;
-            else if (result == cmd_handling_result::unrecognized)
-                std::cout << "unrecognized command\n";
+            try {
+                auto result = handle_command(s);
+                if (result == cmd_handling_result::exit) break;
+                else if (result == cmd_handling_result::unrecognized)
+                    std::cout << "unrecognized command\n";
+            }
+            catch (parsing_exception &e) {
+                std::cout << "Parsing error: " << e.what() << "\n";
+            }
+            catch (expr_eval_exception &e) {
+                std::cout << "Expression evaluation error: " << e.what() << "\n";
+            }
+            catch (std::exception &e) {
+                std::cout << "Exception: " << e.what() << "\n";
+            }
         }
         std::cout << "--- TUNABLE END ---\n";
     }
 private:
-    enum class cmd_handling_result { unrecognized, empty, processed, error, exit };
+    enum class cmd_handling_result { unrecognized, empty, processed, exit };
 
     static void print_help() {
         const int col = 20;
@@ -975,12 +1000,9 @@ private:
                 expression expr;
                 expr.parts.emplace_back(expr_variable{.name=name});
                 auto value = evaluate_expression(expr, 0);
-                if (std::holds_alternative<var_expr_eval_ptr>(value)) {
-                    auto& ptr = std::get<var_expr_eval_ptr>(value);
-                    if (ptr) {
-                        auto val_str = ptr->to_string();
-                        if (val_str) std::cout << name << "=" << *val_str << "\n";
-                    }
+                if (value) {
+                    auto val_str = value->to_string();
+                    if (val_str) std::cout << name << "=" << *val_str << "\n";
                 }
             }
             return cmd_handling_result::processed;
@@ -1000,20 +1022,11 @@ private:
     static cmd_handling_result handle_expression(expression const& expr) {
         if (expr.parts.empty()) return cmd_handling_result::processed;
         auto eval = evaluate_expression(expr, 0);
-
-        if (std::holds_alternative<var_expr_eval_ptr>(eval)) {
-            auto& ptr = std::get<var_expr_eval_ptr>(eval);
-            if (ptr) {
-                auto s = ptr->to_string();
-                if (s) std::cout << *s << "\n";
-            }
-            return cmd_handling_result::processed;
+        if (eval) {
+            auto s = eval->to_string();
+            if (s) std::cout << *s << "\n";
         }
-        else if (std::holds_alternative<var_expr_eval_error>(eval)) {
-            auto& error = std::get<var_expr_eval_error>(eval);
-            std::cout << to_string(error) << "\n";
-        }
-        return cmd_handling_result::error;
+        return cmd_handling_result::processed;
     }
 };
 
