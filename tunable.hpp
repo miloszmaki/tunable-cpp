@@ -82,7 +82,6 @@ _tunable_unary_operator_checker(&, addr)
     template <typename TL, typename TR> \
     struct has_binary_operator_##name <container<TL>, container<TR>> : has_binary_operator_##name<TL,TR> {};
 
-_tunable_binary_operator_checker(=, assign)
 _tunable_binary_operator_checker(+, plus)
 _tunable_binary_operator_checker(-, minus)
 _tunable_binary_operator_checker(*, mul)
@@ -99,6 +98,8 @@ _tunable_binary_operator_checker(||, or)
 _tunable_binary_operator_checker(&, bit_and)
 _tunable_binary_operator_checker(|, bit_or)
 _tunable_binary_operator_checker(^, bit_xor)
+
+_tunable_binary_operator_checker(=, assign)
 _tunable_binary_operator_checker(+=, add_eq)
 _tunable_binary_operator_checker(-=, sub_eq)
 _tunable_binary_operator_checker(*=, mul_eq)
@@ -493,6 +494,7 @@ public:
     virtual ~expr_evaluation() {}
 
     bool is_const() const { return constant; }
+    virtual std::type_index type() const = 0;
     template <class T> bool is() const { return type() == std::type_index(typeid(T)); }
     template <class T> T const& value() const;
 
@@ -520,10 +522,83 @@ public:
 private:
     bool constant = false;
 
-    virtual std::type_index type() const = 0;
-
     template <class T> static expr_eval_ptr make_lvalue(T& ref, bool is_ptr);
     template <class T> static expr_eval_ptr make_rvalue(T const& ref, bool is_ptr);
+};
+
+// allows to call binary operators on arbitrary types
+template <class TL>
+class binary_operators {
+public:
+    template <class TR>
+    static void register_type() {
+        std::type_index type = typeid(TR);
+        auto it = op_maps.find(type);
+        if (it != op_maps.end()) return;
+
+        auto &ops = op_maps[type];
+
+#define _tunable_register_binary_op(op, name, lvalue) \
+            if constexpr (has_binary_operator_##name<TL,TR>::value) { \
+                ops[#op] = [&](TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_const) -> expr_eval_ptr { \
+                    if constexpr (lvalue) { \
+                        if (lhs_is_const) throw std::runtime_error("can't apply on a constant"); \
+                        return expr_evaluation::make_lvalue(lhs op rhs->value<TR>()); \
+                    } \
+                    else return expr_evaluation::make_rvalue((TL const&)lhs op rhs->value<TR>()); \
+                }; \
+            }
+#define _tunable_register_binary_op_rvalue(op, name) _tunable_register_binary_op(op, name, false)
+#define _tunable_register_binary_op_lvalue(op, name) _tunable_register_binary_op(op, name, true)
+
+        _tunable_register_binary_op_rvalue(+, plus)
+        _tunable_register_binary_op_rvalue(-, minus)
+        _tunable_register_binary_op_rvalue(*, mul)
+        _tunable_register_binary_op_rvalue(/, div)
+        _tunable_register_binary_op_rvalue(%, mod)
+        _tunable_register_binary_op_rvalue(==, eq)
+        _tunable_register_binary_op_rvalue(!=, neq)
+        _tunable_register_binary_op_rvalue(<, lt)
+        _tunable_register_binary_op_rvalue(<=, le)
+        _tunable_register_binary_op_rvalue(>, gt)
+        _tunable_register_binary_op_rvalue(>=, ge)
+        _tunable_register_binary_op_rvalue(&&, and)
+        _tunable_register_binary_op_rvalue(||, or)
+        _tunable_register_binary_op_rvalue(&, bit_and)
+        _tunable_register_binary_op_rvalue(|, bit_or)
+        _tunable_register_binary_op_rvalue(^, bit_xor)
+
+        _tunable_register_binary_op_lvalue(=, assign)
+        _tunable_register_binary_op_lvalue(+=, add_eq)
+        _tunable_register_binary_op_lvalue(-=, sub_eq)
+        _tunable_register_binary_op_lvalue(*=, mul_eq)
+        _tunable_register_binary_op_lvalue(/=, div_eq)
+        _tunable_register_binary_op_lvalue(%=, mod_eq)
+        _tunable_register_binary_op_lvalue(&=, bit_and_eq)
+        _tunable_register_binary_op_lvalue(|=, bit_or_eq)
+        _tunable_register_binary_op_lvalue(^=, bit_xor_eq)
+
+        // todo: "<<", ">>", "<<=", ">>=", "::", ",", "?", ":"
+
+#undef _tunable_register_binary_op_lvalue
+#undef _tunable_register_binary_op_rvalue
+#undef _tunable_register_binary_op
+    }
+
+    static std::optional<expr_eval_ptr> call(std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_const) {
+        auto op_map_it = op_maps.find(rhs->type());
+        if (op_map_it == op_maps.end()) return std::nullopt;
+        auto &ops = op_map_it->second;
+        auto op_func_it = ops.find(op_type);
+        if (op_func_it == ops.end()) return std::nullopt;
+        auto &op = op_func_it->second;
+        return op(lhs, rhs, lhs_is_const);
+    }
+
+private:
+    using op_func = std::function<expr_eval_ptr(TL&, expr_eval_ptr const&, bool)>;
+    using op_map = std::map<std::string, op_func>;
+    inline static std::map<std::type_index, op_map> op_maps;
 };
 
 template <class T>
@@ -534,6 +609,8 @@ public:
     virtual ~expr_eval_typed() {
         if (owned && ptr) delete ptr;
     }
+
+    virtual std::type_index type() const { return typeid(T); }
 
     T const& value() const { return *ptr; }
 
@@ -584,74 +661,22 @@ public:
     }
 
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
-        // todo: throw expr_eval_exception with proper error, expr and part_idx
+        auto eval = binary_operators<T>::call(type, *ptr, rhs, is_const());
+        if (eval) return std::move(*eval);
 
         if (type == "=") {
-            if (rhs->is<T>()) {
-                // if types match assign directly
-                if constexpr (has_binary_operator_assign<T,T>::value) {
-                    return make_lvalue(*ptr = rhs->value<T>()); // todo: move if rhs->ptr owned?
-                }
-                throw std::runtime_error("no assignment operator");
-            }
-            else {
-                if (value_is_ptr && rhs->is_ptr())
-                    throw std::runtime_error("implicit casting of pointers of different type");
-                auto str = rhs->to_string(); // serialize
-                if (!str) throw std::runtime_error("serialization error");
-                // deserialize
-                if (!from_string(*ptr, *str)) throw std::runtime_error("deserialization error");
-                return make_lvalue(*ptr);
-            }
+            if (value_is_ptr && rhs->is_ptr())
+                throw std::runtime_error("implicit casting of pointers of different type");
+            auto str = rhs->to_string(); // serialize
+            if (!str) throw std::runtime_error("serialization error");
+            // deserialize
+            if (!from_string(*ptr, *str)) throw std::runtime_error("deserialization error");
+            return make_lvalue(*ptr);
         }
-
-        if (!rhs->is<T>()) throw std::runtime_error("only same types are supported now");
-#define _tunable_apply_binary_op(op, name) \
-        if (type == #op) { \
-            if constexpr (has_binary_operator_##name<T,T>::value) { \
-                return expr_evaluation::make_rvalue(value() op rhs->value<T>()); \
-            } \
-        }
-             _tunable_apply_binary_op(+, plus)
-        else _tunable_apply_binary_op(-, minus)
-        else _tunable_apply_binary_op(*, mul)
-        else _tunable_apply_binary_op(/, div)
-        else _tunable_apply_binary_op(%, mod)
-        else _tunable_apply_binary_op(==, eq)
-        else _tunable_apply_binary_op(!=, neq)
-        else _tunable_apply_binary_op(<, lt)
-        else _tunable_apply_binary_op(<=, le)
-        else _tunable_apply_binary_op(>, gt)
-        else _tunable_apply_binary_op(>=, ge)
-        else _tunable_apply_binary_op(&&, and)
-        else _tunable_apply_binary_op(||, or)
-        else _tunable_apply_binary_op(&, bit_and)
-        else _tunable_apply_binary_op(|, bit_or)
-        else _tunable_apply_binary_op(^, bit_xor)
-
-#undef _tunable_apply_binary_op
-
-#define _tunable_apply_binary_op(op, name) \
-        if (type == #op) { \
-            if constexpr (has_binary_operator_##name<T,T>::value) { \
-                if (is_const()) throw std::runtime_error("can't apply on a constant"); \
-                return expr_evaluation::make_lvalue(*ptr op rhs->value<T>()); \
-            } \
-        }
-             _tunable_apply_binary_op(+=, add_eq)
-        else _tunable_apply_binary_op(-=, sub_eq)
-        else _tunable_apply_binary_op(*=, mul_eq)
-        else _tunable_apply_binary_op(/=, div_eq)
-        else _tunable_apply_binary_op(%=, mod_eq)
-        else _tunable_apply_binary_op(&=, bit_and_eq)
-        else _tunable_apply_binary_op(|=, bit_or_eq)
-        else _tunable_apply_binary_op(^=, bit_xor_eq)
-
-#undef _tunable_apply_binary_op
-
-        // todo: "<<", ">>", "<<=", ">>=", "::", ",", "?", ":"
 
         throw std::runtime_error("invalid operator");
+
+        // todo: throw expr_eval_exception with proper error, expr and part_idx
     }
 
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
@@ -659,8 +684,6 @@ public:
 private:
     T* ptr = nullptr;
     bool owned = false, value_is_ptr = false;
-
-    virtual std::type_index type() const { return typeid(T); }
 };
 
 template <class T>
@@ -873,6 +896,14 @@ public:
 private:
     inline static std::vector<member_var_base*> members;
 };
+
+// register pairs of types for binary operator evaluation
+template <class T1, class T2>
+void register_binary_op_types() {
+    binary_operators<T1>::template register_type<T2>();
+    if constexpr (!std::is_same<T1,T2>::value)
+        binary_operators<T2>::template register_type<T1>();
+}
 
 namespace { // expression evaluation
 
@@ -1181,6 +1212,7 @@ class interaction_loop
 {
 public:
     static void run() {
+        init();
         std::cout << "--- TUNABLE BEGIN ---\n";
         print_help();
         while (true) {
@@ -1207,6 +1239,41 @@ public:
     }
 private:
     enum class cmd_handling_result { unrecognized, empty, processed, exit };
+
+    static void init() {
+#define _tunable_register_binary_op_types_numeric(i, T) \
+        if constexpr(i <= 1)  register_binary_op_types<T, char>(); \
+        if constexpr(i <= 2)  register_binary_op_types<T, unsigned char>(); \
+        if constexpr(i <= 3)  register_binary_op_types<T, short int>(); \
+        if constexpr(i <= 4)  register_binary_op_types<T, unsigned short int>(); \
+        if constexpr(i <= 5)  register_binary_op_types<T, int>(); \
+        if constexpr(i <= 6)  register_binary_op_types<T, unsigned int>(); \
+        if constexpr(i <= 7)  register_binary_op_types<T, long int>(); \
+        if constexpr(i <= 8)  register_binary_op_types<T, unsigned long int>(); \
+        if constexpr(i <= 9)  register_binary_op_types<T, long long>(); \
+        if constexpr(i <= 10) register_binary_op_types<T, unsigned long long>(); \
+        if constexpr(i <= 11) register_binary_op_types<T, float>(); \
+        if constexpr(i <= 12) register_binary_op_types<T, double>(); \
+        if constexpr(i <= 13) register_binary_op_types<T, long double>();
+
+        _tunable_register_binary_op_types_numeric(1,  char)
+        _tunable_register_binary_op_types_numeric(2,  unsigned char)
+        _tunable_register_binary_op_types_numeric(3,  short int)
+        _tunable_register_binary_op_types_numeric(4,  unsigned short int)
+        _tunable_register_binary_op_types_numeric(5,  int)
+        _tunable_register_binary_op_types_numeric(6,  unsigned int)
+        _tunable_register_binary_op_types_numeric(7,  long int)
+        _tunable_register_binary_op_types_numeric(8,  unsigned long int)
+        _tunable_register_binary_op_types_numeric(9,  long long)
+        _tunable_register_binary_op_types_numeric(10, unsigned long long)
+        _tunable_register_binary_op_types_numeric(11, float)
+        _tunable_register_binary_op_types_numeric(12, double)
+        _tunable_register_binary_op_types_numeric(13, long double)
+
+#undef _tunable_register_binary_op_types_numeric
+
+        register_binary_op_types<std::string, char>();
+    }
 
     static void print_help() {
         const int col = 20;
@@ -1281,14 +1348,16 @@ private:
 #define _tunable_uniqid __LINE__
 #endif
 
+#define tunable_op(T1, T2) _tunable_impl::register_binary_op_types<T1,T2>()
+
 #define _tunable_var_type(x) std::remove_reference<decltype(x)>::type
 
 #define _tunable_member(T,M,x) _tunable_impl::member_var_factory::create<T,M>(#x, [](T& t) -> M& { return t.x; })
 // tunable_member(Class,x) - register member variable Class::x as tunable
 #define tunable_member(Class,x) _tunable_member(Class, _tunable_var_type(Class::x), x)
 
-#define _tunable_var_(x,n) _tunable_impl::tunable _tunable_for_##n(x, #x)
-#define _tunable_var(x,n) _tunable_var_(x, n)
+#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); tunable_op(T,T)
+#define _tunable_var(x,n) _tunable_var_(_tunable_var_type(x), x, n)
 // tunable_var(x) - capture variable x as tunable
 #define tunable_var(x) _tunable_var(x, _tunable_uniqid)
 
