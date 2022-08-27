@@ -526,6 +526,57 @@ private:
     template <class T> static expr_eval_ptr make_rvalue(T const& ref, bool is_ptr);
 };
 
+template <class TL, class TR>
+std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, TL& lhs, TR const& rhs, bool lhs_is_const) {
+#define _tunable_apply_binary_op(op, name, lvalue) \
+    if constexpr (has_binary_operator_##name<TL,TR>::value) { \
+        if (op_type == #op) { \
+            if constexpr (lvalue) { \
+                if (lhs_is_const) throw std::runtime_error("can't apply on a constant"); \
+                return expr_evaluation::make_lvalue(lhs op rhs); \
+            } \
+            else return expr_evaluation::make_rvalue((TL const&)lhs op rhs); \
+        } \
+    }
+#define _tunable_apply_binary_op_rvalue(op, name) _tunable_apply_binary_op(op, name, false)
+#define _tunable_apply_binary_op_lvalue(op, name) _tunable_apply_binary_op(op, name, true)
+
+    _tunable_apply_binary_op_rvalue(+, plus)
+    _tunable_apply_binary_op_rvalue(-, minus)
+    _tunable_apply_binary_op_rvalue(*, mul)
+    _tunable_apply_binary_op_rvalue(/, div)
+    _tunable_apply_binary_op_rvalue(%, mod)
+    _tunable_apply_binary_op_rvalue(==, eq)
+    _tunable_apply_binary_op_rvalue(!=, neq)
+    _tunable_apply_binary_op_rvalue(<, lt)
+    _tunable_apply_binary_op_rvalue(<=, le)
+    _tunable_apply_binary_op_rvalue(>, gt)
+    _tunable_apply_binary_op_rvalue(>=, ge)
+    _tunable_apply_binary_op_rvalue(&&, and)
+    _tunable_apply_binary_op_rvalue(||, or)
+    _tunable_apply_binary_op_rvalue(&, bit_and)
+    _tunable_apply_binary_op_rvalue(|, bit_or)
+    _tunable_apply_binary_op_rvalue(^, bit_xor)
+
+    _tunable_apply_binary_op_lvalue(=, assign)
+    _tunable_apply_binary_op_lvalue(+=, add_eq)
+    _tunable_apply_binary_op_lvalue(-=, sub_eq)
+    _tunable_apply_binary_op_lvalue(*=, mul_eq)
+    _tunable_apply_binary_op_lvalue(/=, div_eq)
+    _tunable_apply_binary_op_lvalue(%=, mod_eq)
+    _tunable_apply_binary_op_lvalue(&=, bit_and_eq)
+    _tunable_apply_binary_op_lvalue(|=, bit_or_eq)
+    _tunable_apply_binary_op_lvalue(^=, bit_xor_eq)
+
+    // todo: "<<", ">>", "<<=", ">>=", "::", ",", "?", ":"
+
+#undef _tunable_apply_binary_op_lvalue
+#undef _tunable_apply_binary_op_rvalue
+#undef _tunable_apply_binary_op
+
+    return std::nullopt;
+}
+
 // allows to call binary operators on arbitrary types
 template <class TL>
 class binary_operators {
@@ -533,72 +584,23 @@ public:
     template <class TR>
     static void register_type() {
         std::type_index type = typeid(TR);
-        auto it = op_maps.find(type);
-        if (it != op_maps.end()) return;
+        if (op_funcs.count(type)) return;
 
-        auto &ops = op_maps[type];
-
-#define _tunable_register_binary_op(op, name, lvalue) \
-            if constexpr (has_binary_operator_##name<TL,TR>::value) { \
-                ops[#op] = [&](TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_const) -> expr_eval_ptr { \
-                    if constexpr (lvalue) { \
-                        if (lhs_is_const) throw std::runtime_error("can't apply on a constant"); \
-                        return expr_evaluation::make_lvalue(lhs op rhs->value<TR>()); \
-                    } \
-                    else return expr_evaluation::make_rvalue((TL const&)lhs op rhs->value<TR>()); \
-                }; \
-            }
-#define _tunable_register_binary_op_rvalue(op, name) _tunable_register_binary_op(op, name, false)
-#define _tunable_register_binary_op_lvalue(op, name) _tunable_register_binary_op(op, name, true)
-
-        _tunable_register_binary_op_rvalue(+, plus)
-        _tunable_register_binary_op_rvalue(-, minus)
-        _tunable_register_binary_op_rvalue(*, mul)
-        _tunable_register_binary_op_rvalue(/, div)
-        _tunable_register_binary_op_rvalue(%, mod)
-        _tunable_register_binary_op_rvalue(==, eq)
-        _tunable_register_binary_op_rvalue(!=, neq)
-        _tunable_register_binary_op_rvalue(<, lt)
-        _tunable_register_binary_op_rvalue(<=, le)
-        _tunable_register_binary_op_rvalue(>, gt)
-        _tunable_register_binary_op_rvalue(>=, ge)
-        _tunable_register_binary_op_rvalue(&&, and)
-        _tunable_register_binary_op_rvalue(||, or)
-        _tunable_register_binary_op_rvalue(&, bit_and)
-        _tunable_register_binary_op_rvalue(|, bit_or)
-        _tunable_register_binary_op_rvalue(^, bit_xor)
-
-        _tunable_register_binary_op_lvalue(=, assign)
-        _tunable_register_binary_op_lvalue(+=, add_eq)
-        _tunable_register_binary_op_lvalue(-=, sub_eq)
-        _tunable_register_binary_op_lvalue(*=, mul_eq)
-        _tunable_register_binary_op_lvalue(/=, div_eq)
-        _tunable_register_binary_op_lvalue(%=, mod_eq)
-        _tunable_register_binary_op_lvalue(&=, bit_and_eq)
-        _tunable_register_binary_op_lvalue(|=, bit_or_eq)
-        _tunable_register_binary_op_lvalue(^=, bit_xor_eq)
-
-        // todo: "<<", ">>", "<<=", ">>=", "::", ",", "?", ":"
-
-#undef _tunable_register_binary_op_lvalue
-#undef _tunable_register_binary_op_rvalue
-#undef _tunable_register_binary_op
+        op_funcs[type] = [](std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_const) {
+            return apply_binary_op<TL,TR>(op_type, lhs, rhs->value<TR>(), lhs_is_const);
+        };
     }
 
     static std::optional<expr_eval_ptr> call(std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_const) {
-        auto op_map_it = op_maps.find(rhs->type());
-        if (op_map_it == op_maps.end()) return std::nullopt;
-        auto &ops = op_map_it->second;
-        auto op_func_it = ops.find(op_type);
-        if (op_func_it == ops.end()) return std::nullopt;
-        auto &op = op_func_it->second;
-        return op(lhs, rhs, lhs_is_const);
+        auto op_func_it = op_funcs.find(rhs->type());
+        if (op_func_it == op_funcs.end()) return std::nullopt;
+        auto &op_func = op_func_it->second;
+        return op_func(op_type, lhs, rhs, lhs_is_const);
     }
 
 private:
-    using op_func = std::function<expr_eval_ptr(TL&, expr_eval_ptr const&, bool)>;
-    using op_map = std::map<std::string, op_func>;
-    inline static std::map<std::type_index, op_map> op_maps;
+    using op_func = std::function<std::optional<expr_eval_ptr>(std::string const&, TL&, expr_eval_ptr const&, bool)>;
+    inline static std::map<std::type_index, op_func> op_funcs;
 };
 
 template <class T>
@@ -661,6 +663,12 @@ public:
     }
 
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
+        if (rhs->is<T>()) {
+            auto eval = apply_binary_op<T,T>(type, *ptr, rhs->value<T>(), is_const());
+            if (!eval) throw std::runtime_error("invalid operator");
+            return std::move(*eval);
+        }
+
         auto eval = binary_operators<T>::call(type, *ptr, rhs, is_const());
         if (eval) return std::move(*eval);
 
@@ -1242,33 +1250,35 @@ private:
 
     static void init() {
 #define _tunable_register_binary_op_types_numeric(i, T) \
-        if constexpr(i <= 1)  register_binary_op_types<T, char>(); \
-        if constexpr(i <= 2)  register_binary_op_types<T, unsigned char>(); \
-        if constexpr(i <= 3)  register_binary_op_types<T, short int>(); \
-        if constexpr(i <= 4)  register_binary_op_types<T, unsigned short int>(); \
-        if constexpr(i <= 5)  register_binary_op_types<T, int>(); \
-        if constexpr(i <= 6)  register_binary_op_types<T, unsigned int>(); \
-        if constexpr(i <= 7)  register_binary_op_types<T, long int>(); \
-        if constexpr(i <= 8)  register_binary_op_types<T, unsigned long int>(); \
-        if constexpr(i <= 9)  register_binary_op_types<T, long long>(); \
-        if constexpr(i <= 10) register_binary_op_types<T, unsigned long long>(); \
-        if constexpr(i <= 11) register_binary_op_types<T, float>(); \
-        if constexpr(i <= 12) register_binary_op_types<T, double>(); \
-        if constexpr(i <= 13) register_binary_op_types<T, long double>();
+        if constexpr(i < 1)  register_binary_op_types<T, char>(); \
+        if constexpr(i < 2)  register_binary_op_types<T, signed char>(); \
+        if constexpr(i < 3)  register_binary_op_types<T, unsigned char>(); \
+        if constexpr(i < 4)  register_binary_op_types<T, short>(); \
+        if constexpr(i < 5)  register_binary_op_types<T, unsigned short>(); \
+        if constexpr(i < 6)  register_binary_op_types<T, int>(); \
+        if constexpr(i < 7)  register_binary_op_types<T, unsigned int>(); \
+        if constexpr(i < 8)  register_binary_op_types<T, long>(); \
+        if constexpr(i < 9)  register_binary_op_types<T, unsigned long>(); \
+        if constexpr(i < 10) register_binary_op_types<T, long long>(); \
+        if constexpr(i < 11) register_binary_op_types<T, unsigned long long>(); \
+        if constexpr(i < 12) register_binary_op_types<T, float>(); \
+        if constexpr(i < 13) register_binary_op_types<T, double>(); \
+        if constexpr(i < 14) register_binary_op_types<T, long double>();
 
+        _tunable_register_binary_op_types_numeric(0,  bool)
         _tunable_register_binary_op_types_numeric(1,  char)
-        _tunable_register_binary_op_types_numeric(2,  unsigned char)
-        _tunable_register_binary_op_types_numeric(3,  short int)
-        _tunable_register_binary_op_types_numeric(4,  unsigned short int)
-        _tunable_register_binary_op_types_numeric(5,  int)
-        _tunable_register_binary_op_types_numeric(6,  unsigned int)
-        _tunable_register_binary_op_types_numeric(7,  long int)
-        _tunable_register_binary_op_types_numeric(8,  unsigned long int)
-        _tunable_register_binary_op_types_numeric(9,  long long)
-        _tunable_register_binary_op_types_numeric(10, unsigned long long)
-        _tunable_register_binary_op_types_numeric(11, float)
-        _tunable_register_binary_op_types_numeric(12, double)
-        _tunable_register_binary_op_types_numeric(13, long double)
+        _tunable_register_binary_op_types_numeric(2,  signed char)
+        _tunable_register_binary_op_types_numeric(3,  unsigned char)
+        _tunable_register_binary_op_types_numeric(4,  short)
+        _tunable_register_binary_op_types_numeric(5,  unsigned short)
+        _tunable_register_binary_op_types_numeric(6,  int)
+        _tunable_register_binary_op_types_numeric(7,  unsigned int)
+        _tunable_register_binary_op_types_numeric(8,  long)
+        _tunable_register_binary_op_types_numeric(9,  unsigned long)
+        _tunable_register_binary_op_types_numeric(10, long long)
+        _tunable_register_binary_op_types_numeric(11, unsigned long long)
+        _tunable_register_binary_op_types_numeric(12, float)
+        _tunable_register_binary_op_types_numeric(13, double)
 
 #undef _tunable_register_binary_op_types_numeric
 
