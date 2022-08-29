@@ -1371,7 +1371,7 @@ private:
 // tunable_member(Class,x) - register member variable Class::x as tunable
 #define tunable_member(Class,x) _tunable_member(Class, _tunable_var_type(Class::x), x)
 
-#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x); tunable_op(T,T)
+#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x)
 #define _tunable_var(x,n) _tunable_var_(_tunable_var_type(x), x, n)
 // tunable_var(x) - capture variable x as tunable
 #define tunable_var(x) _tunable_var(x, _tunable_uniqid)
