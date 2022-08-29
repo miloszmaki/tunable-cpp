@@ -1009,6 +1009,11 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                             ref.push_back(eval->value<T>());
                             return expr_evaluation::make_void();
                         }
+                        else { // implicit type conversion
+                            ref.emplace_back();
+                            if (binary_operators<T>::call("=", ref.back(), eval, false))
+                                return expr_evaluation::make_void();
+                        }
                         throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                     }
                     else if (method.name == "resize") {
