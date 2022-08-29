@@ -467,7 +467,7 @@ struct expr_eval_exception : public std::exception {
         auto prefix = expr.to_string(0, part_idx);
         auto suffix = expr.to_string(part_idx);
         std::string indent(prefix.size(), ' ');
-        std::string marker(expr.to_string(part_idx, part_idx+1).size(), '^');
+        std::string marker(std::max(1UL, expr.to_string(part_idx, part_idx+1).size()), '^');
 
         msg = errors.at(error) + "\n" +
               prefix + suffix + "\n" +
