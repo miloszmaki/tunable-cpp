@@ -1137,11 +1137,16 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
             auto var_eval = std::move(*opt_var_eval);
             if (!var_eval) throw std::runtime_error("impossible");
             // evaluate suffix (member variables and specialized operators and methods)
-            while (suffix_idx < expr.parts.size()) {
-                auto ret = evaluate_var_expression(std::move(var_eval), expr, suffix_idx);
-                var_eval = std::move(ret.ptr);
-                if (ret.next_part_idx == suffix_idx) break;
-                suffix_idx = ret.next_part_idx;
+            try {
+                while (suffix_idx < expr.parts.size()) {
+                    auto ret = evaluate_var_expression(std::move(var_eval), expr, suffix_idx);
+                    var_eval = std::move(ret.ptr);
+                    if (ret.next_part_idx == suffix_idx) break;
+                    suffix_idx = ret.next_part_idx;
+                }
+            }
+            catch (std::exception &e) {
+                return std::nullopt;
             }
             return expr_eval_result{std::move(var_eval), suffix_idx};
         })
