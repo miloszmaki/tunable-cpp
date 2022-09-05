@@ -1237,7 +1237,8 @@ inline expr_eval_ptr evaluate_expression(expression const& expr, size_t part_idx
         auto& brackets = std::get<expr_brackets>(part);
         if (brackets.type == '(') {
             auto eval = evaluate_expression(*brackets.nested, 0);
-            return evaluate_binary_op_expression(std::move(eval), expr, part_idx + 1);
+            auto res = evaluate_var_expression(std::move(eval), expr, part_idx + 1);
+            return evaluate_binary_op_expression(std::move(res.ptr), expr, res.next_part_idx);
         }
     }
     else { // variable or constant
