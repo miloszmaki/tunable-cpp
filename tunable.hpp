@@ -753,6 +753,17 @@ private:
     void remove_from_type(std::string const& name);
 };
 
+// tunable array support
+template <class T, size_t N>
+class tunable<T[N]> {
+public:
+    tunable(T* var, std::string const& name, bool is_member = false)
+        : ptr(var), t(ptr, name, is_member) {}
+private:
+    T* ptr; // needed to get the reference
+    tunable<T*> t;
+};
+
 template <class T, int addr_recursion>
 void tunable_factory::create(T& ref, std::string const& name) {
     tunables.emplace_back(new tunable<T, addr_recursion>(ref, name));
