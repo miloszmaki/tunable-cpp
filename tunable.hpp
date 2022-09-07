@@ -487,6 +487,102 @@ private:
     std::string msg;
 };
 
+enum class operator_side { prefix, postfix, inner };
+struct operator_context {
+    size_t part_idx;
+    operator_side side;
+    int precedence; // lower goes first
+    int associativity; // 1 - left to right, -1 - right to left
+
+    bool operator<(operator_context const& other) const {
+        if (precedence != other.precedence) return precedence < other.precedence;
+        if (associativity > 0) return part_idx < other.part_idx;
+        return part_idx > other.part_idx;
+    }
+};
+
+std::vector<operator_context> compute_precedence(expression const& expr) {
+    std::vector<operator_context> precedence;
+
+    using op_prec_assoc_map = std::map<std::string, std::pair<int, int>>;
+    static const op_prec_assoc_map inner_op_prec_assoc {
+        {"::", {1, 1}},
+        {".", {2, 1}}, {"->", {2, 1}},
+        {"*", {5, 1}}, {"/", {5, 1}}, {"%", {5, 1}},
+        {"+", {6, 1}}, {"-", {6, 1}},
+        {"<<", {7, 1}}, {">>", {7, 1}},
+        {"<", {9, 1}}, {"<=", {9, 1}}, {">", {9, 1}}, {">=", {9, 1}},
+        {"==", {10, 1}}, {"!=", {10, 1}},
+        {"&", {11, 1}},
+        {"^", {12, 1}},
+        {"|", {13, 1}},
+        {"&&", {14, 1}},
+        {"||", {15, 1}},
+        {"?", {16, -1}},
+        {"=", {16, -1}},
+        {"+=", {16, -1}}, {"-=", {16, -1}},
+        {"*=", {16, -1}}, {"/=", {16, -1}}, {"%=", {16, -1}},
+        {"<<=", {16, -1}}, {">>=", {16, -1}},
+        {"=", {16, -1}},
+        {"=", {16, -1}},
+        {"&=", {16, -1}}, {"|=", {16, -1}}, {"^=", {16, -1}},
+        {",", {17, 1}}
+    };
+    static const op_prec_assoc_map postfix_op_prec_assoc {
+        {"++", {2, 1}},
+        {"--", {2, 1}},
+    };
+    static const op_prec_assoc_map prefix_op_prec_assoc {
+        {"++", {3, -1}}, {"--", {3, -1}},
+        {"+", {3, -1}}, {"-", {3, -1}},
+        {"!", {3, -1}}, {"~", {3, -1}},
+        {"*", {3, -1}},
+        {"&", {3, -1}},
+    };
+
+    bool prev_part_is_operand = false;
+    for (size_t i=0; i<expr.parts.size(); i++) {
+        auto& part = expr.parts[i];
+        if (!std::holds_alternative<expr_operator>(part)) {
+            prev_part_is_operand = true;
+            continue;
+        }
+        auto& op = std::get<expr_operator>(part);
+
+        auto inner_op_it = inner_op_prec_assoc.find(op.type);
+        auto postfix_op_it = postfix_op_prec_assoc.find(op.type);
+        auto prefix_op_it = prefix_op_prec_assoc.find(op.type);
+        bool is_inner_op = inner_op_it != inner_op_prec_assoc.end();
+        bool is_postfix_op = postfix_op_it != postfix_op_prec_assoc.end();
+        bool is_prefix_op = prefix_op_it != prefix_op_prec_assoc.end();
+
+        bool next_part_is_operand = (i+1 < expr.parts.size()) && !std::holds_alternative<expr_operator>(expr.parts[i+1]);
+
+        operator_side side;
+        std::pair<int, int> prec_assoc;
+
+        if (is_postfix_op && prev_part_is_operand && !next_part_is_operand) {
+            side = operator_side::postfix;
+            prec_assoc = postfix_op_it->second;
+        }
+        else if (is_prefix_op && next_part_is_operand && !prev_part_is_operand) {
+            side = operator_side::prefix;
+            prec_assoc = prefix_op_it->second;
+        }
+        else if (is_inner_op) {
+            side = operator_side::inner;
+            prec_assoc = inner_op_it->second;
+        }
+        else throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, i);
+
+        precedence.emplace_back(operator_context{i, side, prec_assoc.first, prec_assoc.second});
+        prev_part_is_operand = false;
+    }
+
+    std::sort(precedence.begin(), precedence.end());
+    return precedence;
+}
+
 class expr_evaluation;
 using expr_eval_ptr = std::unique_ptr<expr_evaluation>;
 
