@@ -523,9 +523,7 @@ std::vector<operator_context> compute_precedence(expression const& expr) {
         {"+=", {16, -1}}, {"-=", {16, -1}},
         {"*=", {16, -1}}, {"/=", {16, -1}}, {"%=", {16, -1}},
         {"<<=", {16, -1}}, {">>=", {16, -1}},
-        {"=", {16, -1}},
-        {"=", {16, -1}},
-        {"&=", {16, -1}}, {"|=", {16, -1}}, {"^=", {16, -1}},
+        {"&=", {16, -1}}, {"^=", {16, -1}}, {"|=", {16, -1}},
         {",", {17, 1}}
     };
     static const op_prec_assoc_map postfix_op_prec_assoc {
@@ -627,6 +625,33 @@ private:
 
     template <class T, int addr_recursion> static expr_eval_ptr make_lvalue(T& ref, bool is_ptr);
     template <class T, int addr_recursion> static expr_eval_ptr make_rvalue(T const& ref, bool is_ptr);
+};
+
+
+// undefined type
+struct undefined_type {};
+
+// undefined variable placeholder, allows for assignment only
+class expr_eval_undefined_var : public expr_evaluation {
+public:
+    expr_eval_undefined_var(std::string name) : expr_evaluation(false), name(name) {}
+    virtual ~expr_eval_undefined_var() {}
+
+    virtual std::type_index type() const { return typeid(undefined_type); }
+
+    virtual bool is_ptr() const { return false; }
+    virtual std::optional<std::string> to_string() const { return "undefined"; }
+    virtual expr_eval_ptr create_var(std::string const& name) { throw std::runtime_error("cannot create variable from undefined"); }
+    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const { return std::nullopt; }
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type) { throw std::runtime_error("cannot be applied on undefined"); }
+    virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
+        if (type != "=") throw std::runtime_error("cannot be applied on undefined");
+        return rhs->create_var(name);
+    }
+    virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) { return std::nullopt; }
+
+private:
+    std::string name;
 };
 
 template <class TL, class TR, int lhs_addr_recursion>
@@ -792,6 +817,20 @@ public:
 
         auto eval = binary_operators<T>::call(type, *ptr, rhs, is_rvalue());
         if (eval) return std::move(*eval);
+
+        // static std::map<std::type_index, int> numeric_cast_rank = {
+        //     { typeid(bool), 0 },
+        //     { typeid(int), 1 },
+        //     { typeid(long long), 2 },
+        //     { typeid(double), 3 },
+        // };
+        // todo: implicit numeric casts
+        // find rank of lhs and rhs
+        // if both are numeric:
+        // if lhs has greater rank cast rhs to T and apply op
+        // otherwise apply op in rhs which would convert lhs to its type
+        // unfortunately it gets quite tricky with all conversion rules such as signed/unsigned promotion
+        // see https://en.cppreference.com/w/cpp/language/implicit_conversion
 
         if (type == "=") {
             if (value_is_ptr && rhs->is_ptr())
@@ -1078,7 +1117,7 @@ std::optional<expr_eval_result> process_var_name_prefixes(expression const& expr
     return std::nullopt;
 }
 
-expr_eval_ptr evaluate_expression(expression const& expr, size_t part_idx);
+expr_eval_ptr evaluate_expression(expression const& expr);
 
 template <class T, int addr_recursion>
 std::optional<expr_eval_ptr> expr_eval_typed<T, addr_recursion>::get_member_var(std::string const& name) const {
@@ -1108,7 +1147,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T& ref, expression const
 
 template <class T>
 expr_eval_ptr evaluate_subscript(T& ref, size_t size, expression const& expr) {
-    auto idx_eval = evaluate_expression(expr, 0);
+    auto idx_eval = evaluate_expression(expr);
     if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
     auto str = idx_eval->to_string();
     if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
@@ -1135,7 +1174,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                 if (args.type != '(') return std::nullopt;
                 if (args.nested) { // method with arguments
                     if (method.name == "push_back") {
-                        auto eval = evaluate_expression(*args.nested, 0);
+                        auto eval = evaluate_expression(*args.nested);
                         if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                         if (eval->is<T>()) {
                             ref.push_back(eval->value<T>());
@@ -1150,7 +1189,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                     }
                     else if (method.name == "resize") {
                         // todo: support multiple arguments
-                        auto eval = evaluate_expression(*args.nested, 0);
+                        auto eval = evaluate_expression(*args.nested);
                         if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                         auto s = eval->to_string();
                         if (s && is_integer(*s)) {
@@ -1263,18 +1302,7 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_variable>(part)) { // we've got an undefined variable
         auto &var = std::get<expr_variable>(part);
-        if (expr.parts.size() == 1) throw expr_eval_exception(expr_eval_error::undefined, expr, part_idx); // nothing more, so return an error
-
-        auto &part2 = expr.parts[part_idx + 1];
-        if (std::holds_alternative<expr_operator>(part2)) {
-            auto &op = std::get<expr_operator>(part2).type;
-            if (op == "=") { // create a new variable
-                auto eval = evaluate_expression(expr, part_idx + 2);
-                if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, part_idx + 2);
-                return { eval->create_var(var.name), expr.parts.size() };
-            }
-        }
-        throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx + 1);
+        return { std::make_unique<expr_eval_undefined_var>(var.name), part_idx + 1 };
     }
     else if (std::holds_alternative<expr_constant>(part)) {
         auto cnst = std::get<expr_constant>(part);
@@ -1297,68 +1325,83 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
     throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
 }
 
-inline expr_eval_ptr evaluate_unary_op_expression(expression const& expr, size_t part_idx) {
-    if (part_idx >= expr.parts.size()) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
+inline expr_eval_ptr evaluate_expression(expression const& expr) {
+    if (expr.parts.empty()) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
 
-    auto &part = expr.parts[part_idx];
-    if (std::holds_alternative<expr_operator>(part)) {
-        auto& op = std::get<expr_operator>(part);
-        auto eval = evaluate_expression(expr, part_idx + 1);
-        if (!eval) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-        try {
-            return eval->apply_unary_operator(op.type);
+    // compute operator precedence
+    auto precedence = compute_precedence(expr);
+
+    std::vector<expr_eval_ptr> evals; // list of already evaluated subexpressions
+    std::vector<int> eval_idxs(expr.parts.size(), -1); // for each part, index in evals the part is associated with
+
+    // evaluate tunable variables/constants & nested expressions
+    for (size_t i=0; i<expr.parts.size(); ++i) {
+        auto &part = expr.parts[i];
+        if (std::holds_alternative<expr_brackets>(part)) {
+            auto& brackets = std::get<expr_brackets>(part);
+            if (brackets.type == '(' && (i == 0 || std::holds_alternative<expr_operator>(expr.parts[i-1]))) {
+                evals.emplace_back(evaluate_expression(*brackets.nested));
+                eval_idxs[i] = evals.size() - 1;
+            }
         }
-        catch (std::exception &e) {
-            std::cout << "unary operator error: " << e.what() << "\n";
-            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-        }
-    }
-
-    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-}
-
-inline expr_eval_ptr evaluate_binary_op_expression(expr_eval_ptr var, expression const& expr, size_t part_idx) {
-    if (part_idx >= expr.parts.size()) return var;
-
-    auto &part = expr.parts[part_idx];
-    if (std::holds_alternative<expr_operator>(part)) {
-        auto& op = std::get<expr_operator>(part);
-        // todo: postfix `++`, `--`
-        auto eval = evaluate_expression(expr, part_idx + 1);
-        if (!eval) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-        try {
-            return var->apply_binary_operator(op.type, std::move(eval));
-        }
-        catch (std::exception &e) {
-            std::cout << "binary operator error: " << e.what() << "\n";
-            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
+        else if (std::holds_alternative<expr_variable>(part) ||
+                 std::holds_alternative<expr_constant>(part)) {
+            auto eval = evaluate_value_expression(expr, i);
+            evals.emplace_back(std::move(eval.ptr));
+            auto eval_idx = evals.size() - 1;
+            for (; i<eval.next_part_idx; ++i) eval_idxs[i] = eval_idx;
+            --i;
         }
     }
 
-    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-}
-
-inline expr_eval_ptr evaluate_expression(expression const& expr, size_t part_idx) {
-    if (part_idx >= expr.parts.size()) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
-
-    auto &part = expr.parts[part_idx];
-    if (std::holds_alternative<expr_operator>(part)) {
-        return evaluate_unary_op_expression(expr, part_idx);
-    }
-    else if (std::holds_alternative<expr_brackets>(part)) {
-        auto& brackets = std::get<expr_brackets>(part);
-        if (brackets.type == '(') {
-            auto eval = evaluate_expression(*brackets.nested, 0);
-            auto res = evaluate_var_expression(std::move(eval), expr, part_idx + 1);
-            return evaluate_binary_op_expression(std::move(res.ptr), expr, res.next_part_idx);
+    // evaluate operators according to precedence
+    for (auto &op_ctx : precedence) {
+        if (eval_idxs[op_ctx.part_idx] >= 0) continue;
+        auto &part = expr.parts[op_ctx.part_idx];
+        if (std::holds_alternative<expr_operator>(part)) {
+            auto& op = std::get<expr_operator>(part);
+            if (op_ctx.part_idx == 0 || std::holds_alternative<expr_operator>(expr.parts[op_ctx.part_idx - 1])) { // unary operator
+                auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
+                if (rhs_eval_idx < 0)
+                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                auto& rhs_eval = evals[rhs_eval_idx];
+                if (rhs_eval->is<undefined_type>())
+                    throw expr_eval_exception(expr_eval_error::undefined, expr, op_ctx.part_idx);
+                try {
+                    rhs_eval = rhs_eval->apply_unary_operator(op.type);
+                }
+                catch (std::exception &e) {
+                    std::cout << "unary operator error: " << e.what() << "\n";
+                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                }
+                eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
+            }
+            else { // binary operator
+                auto lhs_eval_idx = eval_idxs[op_ctx.part_idx - 1];
+                auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
+                if (lhs_eval_idx < 0 || rhs_eval_idx < 0)
+                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                auto& lhs_eval = evals[lhs_eval_idx];
+                auto& rhs_eval = evals[rhs_eval_idx];
+                try {
+                    rhs_eval = lhs_eval->apply_binary_operator(op.type, std::move(rhs_eval));
+                }
+                catch (std::exception &e) {
+                    std::cout << "binary operator error: " << e.what() << "\n";
+                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                }
+                lhs_eval = nullptr;
+                eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
+                for (int i = op_ctx.part_idx - 1; i >= 0 && eval_idxs[i] == lhs_eval_idx; i--)
+                    eval_idxs[i] = rhs_eval_idx;
+            }
         }
     }
-    else { // variable or constant
-        auto eval = evaluate_value_expression(expr, part_idx);
-        return evaluate_binary_op_expression(std::move(eval.ptr), expr, eval.next_part_idx);
-    }
 
-    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, part_idx);
+    if (eval_idxs.empty() || eval_idxs[0] < 0 || evals.empty())
+        throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+
+    return std::move(evals[eval_idxs[0]]);
 }
 
 } // expression evaluation
@@ -1464,7 +1507,7 @@ private:
             for (auto &[name,_] : tunable_types::get_var_types()) {
                 expression expr;
                 expr.parts.emplace_back(expr_variable{.name=name});
-                auto value = evaluate_expression(expr, 0);
+                auto value = evaluate_expression(expr);
                 if (value) {
                     auto val_str = value->to_string();
                     if (val_str) std::cout << name << "=" << *val_str << "\n";
@@ -1486,7 +1529,7 @@ private:
 
     static cmd_handling_result handle_expression(expression const& expr) {
         if (expr.parts.empty()) return cmd_handling_result::processed;
-        auto eval = evaluate_expression(expr, 0);
+        auto eval = evaluate_expression(expr);
         if (eval) {
             auto s = eval->to_string();
             if (s) std::cout << *s << "\n";
