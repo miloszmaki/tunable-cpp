@@ -298,6 +298,7 @@ struct expr_operator {
 struct expr_brackets {
     std::unique_ptr<expression> nested;
     char type; // [ ( {
+    char closing() const { return type + (1 + int(type != '(')); }
     std::string to_string() const;
 };
 
@@ -324,7 +325,7 @@ std::string expr_brackets::to_string() const {
     std::string s;
     s += type; // opening bracket
     if (nested) s += nested->to_string();
-    s += type + (1 + int(type != '(')); // closing bracket
+    s += closing(); // closing bracket
     return s;
 }
 
@@ -366,7 +367,7 @@ void expression::parse(char const* s, size_t& i) {
             const int i0 = i;
             expr_brackets p{.nested = std::make_unique<expression>(), .type = s[i]};
             p.nested->parse(s, ++i);
-            if (!one_of("])}", s[i])) throw parsing_exception(parsing_error::unmatched_bracket, s, i0);
+            if (s[i] != p.closing()) throw parsing_exception(parsing_error::unmatched_bracket, s, i0);
             if (p.nested->parts.empty()) p.nested.reset();
             parts.emplace_back(std::move(p));
             continue;
@@ -1340,6 +1341,7 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
         if (std::holds_alternative<expr_brackets>(part)) {
             auto& brackets = std::get<expr_brackets>(part);
             if (brackets.type == '(' && (i == 0 || std::holds_alternative<expr_operator>(expr.parts[i-1]))) {
+                if (!brackets.nested) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, i);
                 evals.emplace_back(evaluate_expression(*brackets.nested));
                 eval_idxs[i] = evals.size() - 1;
             }
@@ -1347,6 +1349,8 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
         else if (std::holds_alternative<expr_variable>(part) ||
                  std::holds_alternative<expr_constant>(part)) {
             auto eval = evaluate_value_expression(expr, i);
+            if (eval.next_part_idx < expr.parts.size() && !std::holds_alternative<expr_operator>(expr.parts[eval.next_part_idx]))
+                throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, eval.next_part_idx);
             evals.emplace_back(std::move(eval.ptr));
             auto eval_idx = evals.size() - 1;
             for (; i<eval.next_part_idx; ++i) eval_idxs[i] = eval_idx;
