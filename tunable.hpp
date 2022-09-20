@@ -102,6 +102,8 @@ _tunable_binary_operator_checker(||, or)
 _tunable_binary_operator_checker(&, bit_and)
 _tunable_binary_operator_checker(|, bit_or)
 _tunable_binary_operator_checker(^, bit_xor)
+_tunable_binary_operator_checker(<<, bit_shl)
+_tunable_binary_operator_checker(>>, bit_shr)
 
 _tunable_binary_operator_checker(=, assign)
 _tunable_binary_operator_checker(+=, add_eq)
@@ -112,6 +114,8 @@ _tunable_binary_operator_checker(%=, mod_eq)
 _tunable_binary_operator_checker(&=, bit_and_eq)
 _tunable_binary_operator_checker(|=, bit_or_eq)
 _tunable_binary_operator_checker(^=, bit_xor_eq)
+_tunable_binary_operator_checker(<<=, bit_shl_eq)
+_tunable_binary_operator_checker(>>=, bit_shr_eq)
 
 _tunable_binary_operator_checker_by_container_type(std::vector, eq)
 _tunable_binary_operator_checker_by_container_type(std::vector, neq)
@@ -279,17 +283,16 @@ struct expr_operator {
     std::string type;
 
     inline static const std::vector<std::string> types{
+        "<<=", ">>=",
         "==", "!=", "<=", ">=", "<<", ">>", "->", "&&", "||", "::",
         "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=",
         ".", ",", "=", "+", "-", "*", "/", "%", "&", "|", "^", "~", "!", "<", ">", "?", ":" };
-        // todo: <<= >>=
 
     static std::string find(char const* s) {
         if (s[0] == 0) return {};
-        char c1 = s[0], c2 = s[1];
+        char c0 = s[0], c1 = s[1], c2 = (s[1] == 0 ? 0 : s[2]);
         for (auto &op : types) {
-            if (op[0] != c1) continue;
-            if (op.size() == 1 || op[1] == c2) return op;
+            if (op[0] == c0 && (op.size() == 1 || (op[1] == c1 && (op.size() == 2 || op[2] == c2)))) return op;
         }
         return {};
     }
@@ -657,49 +660,52 @@ private:
 
 template <class TL, class TR, int lhs_addr_recursion>
 std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, TL& lhs, TR const& rhs, bool lhs_is_rvalue) {
-#define _tunable_apply_binary_op(op, name, lvalue) \
+#define _tunable_apply_binary_op(op, name) \
     if constexpr (has_binary_operator_##name<TL,TR>::value) { \
         if (op_type == #op) { \
-            using TO = typename std::remove_reference<decltype(lhs op rhs)>::type; \
-            constexpr int op_addr_recursion = std::is_same<TO, TL>::value ? lhs_addr_recursion : 0; \
-            if constexpr (lvalue) { \
+            using _TO = decltype(lhs op rhs); \
+            using TO = typename std::remove_reference_t<_TO>; \
+            constexpr int op_addr_recursion = std::is_same_v<TO, TL> ? lhs_addr_recursion : 0; \
+            if constexpr (std::is_lvalue_reference_v<_TO>) { \
                 if (lhs_is_rvalue) throw std::runtime_error("can't modify an rvalue"); \
                 return expr_evaluation::make_lvalue<TO, op_addr_recursion>(lhs op rhs); \
             } \
             else return expr_evaluation::make_rvalue<TO, op_addr_recursion>((TL const&)lhs op rhs); \
         } \
     }
-#define _tunable_apply_binary_op_rvalue(op, name) _tunable_apply_binary_op(op, name, false)
-#define _tunable_apply_binary_op_lvalue(op, name) _tunable_apply_binary_op(op, name, true)
 
-    _tunable_apply_binary_op_rvalue(+, plus)
-    _tunable_apply_binary_op_rvalue(-, minus)
-    _tunable_apply_binary_op_rvalue(*, mul)
-    _tunable_apply_binary_op_rvalue(/, div)
-    _tunable_apply_binary_op_rvalue(%, mod)
-    _tunable_apply_binary_op_rvalue(==, eq)
-    _tunable_apply_binary_op_rvalue(!=, neq)
-    _tunable_apply_binary_op_rvalue(<, lt)
-    _tunable_apply_binary_op_rvalue(<=, le)
-    _tunable_apply_binary_op_rvalue(>, gt)
-    _tunable_apply_binary_op_rvalue(>=, ge)
-    _tunable_apply_binary_op_rvalue(&&, and)
-    _tunable_apply_binary_op_rvalue(||, or)
-    _tunable_apply_binary_op_rvalue(&, bit_and)
-    _tunable_apply_binary_op_rvalue(|, bit_or)
-    _tunable_apply_binary_op_rvalue(^, bit_xor)
+    _tunable_apply_binary_op(+, plus)
+    _tunable_apply_binary_op(-, minus)
+    _tunable_apply_binary_op(*, mul)
+    _tunable_apply_binary_op(/, div)
+    _tunable_apply_binary_op(%, mod)
+    _tunable_apply_binary_op(==, eq)
+    _tunable_apply_binary_op(!=, neq)
+    _tunable_apply_binary_op(<, lt)
+    _tunable_apply_binary_op(<=, le)
+    _tunable_apply_binary_op(>, gt)
+    _tunable_apply_binary_op(>=, ge)
+    _tunable_apply_binary_op(&&, and)
+    _tunable_apply_binary_op(||, or)
+    _tunable_apply_binary_op(&, bit_and)
+    _tunable_apply_binary_op(|, bit_or)
+    _tunable_apply_binary_op(^, bit_xor)
+    _tunable_apply_binary_op(<<, bit_shl)
+    _tunable_apply_binary_op(>>, bit_shr)
 
-    _tunable_apply_binary_op_lvalue(=, assign)
-    _tunable_apply_binary_op_lvalue(+=, add_eq)
-    _tunable_apply_binary_op_lvalue(-=, sub_eq)
-    _tunable_apply_binary_op_lvalue(*=, mul_eq)
-    _tunable_apply_binary_op_lvalue(/=, div_eq)
-    _tunable_apply_binary_op_lvalue(%=, mod_eq)
-    _tunable_apply_binary_op_lvalue(&=, bit_and_eq)
-    _tunable_apply_binary_op_lvalue(|=, bit_or_eq)
-    _tunable_apply_binary_op_lvalue(^=, bit_xor_eq)
+    _tunable_apply_binary_op(=, assign)
+    _tunable_apply_binary_op(+=, add_eq)
+    _tunable_apply_binary_op(-=, sub_eq)
+    _tunable_apply_binary_op(*=, mul_eq)
+    _tunable_apply_binary_op(/=, div_eq)
+    _tunable_apply_binary_op(%=, mod_eq)
+    _tunable_apply_binary_op(&=, bit_and_eq)
+    _tunable_apply_binary_op(|=, bit_or_eq)
+    _tunable_apply_binary_op(^=, bit_xor_eq)
+    _tunable_apply_binary_op(<<=, bit_shl_eq)
+    _tunable_apply_binary_op(>>=, bit_shr_eq)
 
-    // todo: "<<", ">>", "<<=", ">>=", "::", ",", "?", ":"
+    // todo: "::", ",", "?", ":"
 
 #undef _tunable_apply_binary_op_lvalue
 #undef _tunable_apply_binary_op_rvalue
@@ -770,27 +776,28 @@ public:
     virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const;
 
     virtual expr_eval_ptr apply_unary_operator(std::string const& type) {
-#define _tunable_apply_unary_op(op, name, lvalue) \
+#define _tunable_apply_unary_op(op, name) \
         if constexpr (has_unary_operator_##name<T>::value) { \
             if (type == #op) { \
-                using TO = typename std::remove_reference<decltype(op(*ptr))>::type; \
-                constexpr int op_addr_recursion = std::is_same<TO, T>::value ? addr_recursion : 0; \
-                if constexpr (lvalue) { \
+                using _TO = decltype(op(*ptr)); \
+                using TO = typename std::remove_reference_t<_TO>; \
+                constexpr int op_addr_recursion = std::is_same_v<TO, T> ? addr_recursion : 0; \
+                if constexpr (std::is_lvalue_reference_v<_TO>) { \
                     if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
                     return expr_evaluation::make_lvalue<TO, op_addr_recursion>(op(*ptr)); \
                 } \
                 else return expr_evaluation::make_rvalue<TO, op_addr_recursion>(op(*ptr)); \
             } \
         }
-        _tunable_apply_unary_op(+, plus, false)
-        _tunable_apply_unary_op(-, minus, false)
-        _tunable_apply_unary_op(~, bit_neg, false)
-        _tunable_apply_unary_op(++, incr, true)
-        _tunable_apply_unary_op(--, decr, true)
-        _tunable_apply_unary_op(!, neg, false)
+        _tunable_apply_unary_op(+, plus)
+        _tunable_apply_unary_op(-, minus)
+        _tunable_apply_unary_op(~, bit_neg)
+        _tunable_apply_unary_op(++, incr)
+        _tunable_apply_unary_op(--, decr)
+        _tunable_apply_unary_op(!, neg)
 
         if constexpr (has_unary_operator_deref<T>::value) {
-            using TO = typename std::remove_reference<decltype(*(*ptr))>::type;
+            using TO = typename std::remove_reference_t<decltype(*(*ptr))>;
             if (type == "*") {
                 if (*ptr == nullptr) throw std::runtime_error("can't dereference null pointer");
                 return expr_evaluation::make_lvalue<TO, std::max(0, addr_recursion - 1)>(*(*ptr));
@@ -1081,7 +1088,7 @@ private:
 template <class T1, class T2>
 void register_binary_op_types() {
     binary_operators<T1>::template register_type<T2>();
-    if constexpr (!std::is_same<T1,T2>::value)
+    if constexpr (!std::is_same_v<T1,T2>)
         binary_operators<T2>::template register_type<T1>();
 }
 
@@ -1554,7 +1561,7 @@ private:
 
 #define tunable_op(T1, T2) _tunable_impl::register_binary_op_types<T1,T2>()
 
-#define _tunable_var_type(x) std::remove_reference<decltype(x)>::type
+#define _tunable_var_type(x) std::remove_reference_t<decltype(x)>
 
 #define _tunable_member(T,M,x) _tunable_impl::member_var_factory::create<T,M>(#x, [](T& t) -> M& { return t.x; })
 // tunable_member(Class,x) - register member variable Class::x as tunable
