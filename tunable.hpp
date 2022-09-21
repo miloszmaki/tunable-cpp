@@ -841,6 +841,7 @@ public:
         // see https://en.cppreference.com/w/cpp/language/implicit_conversion
 
         if (type == "=") {
+            if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
             if (value_is_ptr && rhs->is_ptr())
                 throw std::runtime_error("implicit casting of pointers of different type");
             auto str = rhs->to_string(); // serialize
@@ -884,7 +885,7 @@ template <class T, int addr_recursion = 0>
 class tunable : public tunable_base {
 public:
     T& ref;
-    tunable(T &var, std::string const& name, bool is_member = false) : ref(var), name(name) {
+    tunable(T &var, std::string const& name) : ref(var), name(name) {
         add_to_type(name);
     }
     virtual ~tunable() {
@@ -900,8 +901,8 @@ private:
 template <class T, size_t N>
 class tunable<T[N]> {
 public:
-    tunable(T* var, std::string const& name, bool is_member = false)
-        : ptr(var), t(ptr, name, is_member) {}
+    tunable(T* var, std::string const& name)
+        : ptr(var), t(ptr, name) {}
 private:
     T* ptr; // needed to get the reference
     tunable<T*> t;
@@ -1073,12 +1074,35 @@ private:
     friend class member_var_factory;
 };
 
+// represents a tunable class array member
+template <class T, class M, size_t N>
+class member_var<T, M[N]> : public member_var_base_typed<T> {
+public:
+    virtual ~member_var() {
+        member_vars<T>::remove(name);
+    }
+    virtual expr_eval_ptr get_var_eval(T& ref) {
+        auto& member_ref = get_ref(ref);
+        return expr_evaluation::make_rvalue((M* const&)member_ref);
+    }
+private:
+    std::string name;
+    M(& (*get_ref)(T&))[N] = nullptr;
+
+    member_var(std::string const& name, M(& (*get_ref)(T&))[N])
+            : name(name), get_ref(get_ref) {
+        member_vars<T>::add(this, name);
+    }
+
+    friend class member_var_factory;
+};
+
 // allows to register class member variables as tunables
 class member_var_factory {
 public:
     template <class T, class M>
     static void create(std::string const& name, M& (*get_ref)(T&)) {
-        members.emplace_back(new member_var<T,M>(name, get_ref));
+        members.emplace_back(new member_var(name, get_ref));
     }
 private:
     inline static std::vector<member_var_base*> members;
