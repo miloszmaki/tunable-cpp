@@ -465,6 +465,10 @@ namespace { // expression evaluation
 enum class expr_eval_error { invalid_syntax, undefined, void_to_value, bad_value_assign, invalid_var_name, idx_out_of_bounds };
 
 struct expr_eval_exception : public std::exception {
+    expr_eval_exception(std::string const& error, expression const& expr, size_t part_idx) {
+        init(error, expr, part_idx);
+    }
+
     expr_eval_exception(expr_eval_error error, expression const& expr, size_t part_idx) {
         static const std::map<expr_eval_error, std::string> errors{
             {expr_eval_error::invalid_syntax, "invalid syntax"},
@@ -474,21 +478,24 @@ struct expr_eval_exception : public std::exception {
             {expr_eval_error::invalid_var_name, "invalid variable name"},
             {expr_eval_error::idx_out_of_bounds, "index out of bounds"}
         };
-
-        auto prefix = expr.to_string(0, part_idx);
-        auto suffix = expr.to_string(part_idx);
-        std::string indent(prefix.size(), ' ');
-        std::string marker(std::max(1UL, expr.to_string(part_idx, part_idx+1).size()), '^');
-
-        msg = errors.at(error) + "\n" +
-              prefix + suffix + "\n" +
-              indent + marker + "\n";
+        init(errors.at(error), expr, part_idx);
     }
 
     virtual const char* what() const noexcept { return msg.c_str(); }
 
 private:
     std::string msg;
+
+    void init(std::string const& error, expression const& expr, size_t part_idx) {
+        auto prefix = expr.to_string(0, part_idx);
+        auto suffix = expr.to_string(part_idx);
+        std::string indent(prefix.size(), ' ');
+        std::string marker(std::max(1UL, expr.to_string(part_idx, part_idx+1).size()), '^');
+
+        msg = error + "\n" +
+              prefix + suffix + "\n" +
+              indent + marker + "\n";
+    }
 };
 
 enum class operator_side { prefix, postfix, inner };
@@ -618,7 +625,7 @@ public:
     template <class T, int addr_recursion = 0> static expr_eval_ptr make_rvalue(T* const& ref) { return make_rvalue<T*, addr_recursion>(ref, true); }
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s) {
         T x;
-        if (!from_string(x, s)) throw std::runtime_error("deserialization");
+        if (!from_string(x, s)) throw std::runtime_error("deserialization error");
         return make_rvalue(x);
     }
 
@@ -647,9 +654,9 @@ public:
     virtual std::optional<std::string> to_string() const { return "undefined"; }
     virtual expr_eval_ptr create_var(std::string const& name) { throw std::runtime_error("cannot create variable from undefined"); }
     virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const { return std::nullopt; }
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type) { throw std::runtime_error("cannot be applied on undefined"); }
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type) { throw std::runtime_error("operator cannot be applied on undefined"); }
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
-        if (type != "=") throw std::runtime_error("cannot be applied on undefined");
+        if (type != "=") throw std::runtime_error("operator cannot be applied on undefined");
         return rhs->create_var(name);
     }
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) { return std::nullopt; }
@@ -704,8 +711,6 @@ std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, TL& lhs
     _tunable_apply_binary_op(^=, bit_xor_eq)
     _tunable_apply_binary_op(<<=, bit_shl_eq)
     _tunable_apply_binary_op(>>=, bit_shr_eq)
-
-    // todo: "::", ",", "?", ":"
 
 #undef _tunable_apply_binary_op_lvalue
 #undef _tunable_apply_binary_op_rvalue
@@ -813,7 +818,7 @@ public:
 
 
 #undef _tunable_apply_unary_op
-        throw std::runtime_error("invalid operator");
+        throw std::runtime_error("invalid operand");
     }
 
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
@@ -826,20 +831,6 @@ public:
         auto eval = binary_operators<T>::call(type, *ptr, rhs, is_rvalue());
         if (eval) return std::move(*eval);
 
-        // static std::map<std::type_index, int> numeric_cast_rank = {
-        //     { typeid(bool), 0 },
-        //     { typeid(int), 1 },
-        //     { typeid(long long), 2 },
-        //     { typeid(double), 3 },
-        // };
-        // todo: implicit numeric casts
-        // find rank of lhs and rhs
-        // if both are numeric:
-        // if lhs has greater rank cast rhs to T and apply op
-        // otherwise apply op in rhs which would convert lhs to its type
-        // unfortunately it gets quite tricky with all conversion rules such as signed/unsigned promotion
-        // see https://en.cppreference.com/w/cpp/language/implicit_conversion
-
         if (type == "=") {
             if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
             if (value_is_ptr && rhs->is_ptr())
@@ -851,9 +842,7 @@ public:
             return make_lvalue<T, addr_recursion>(*ptr);
         }
 
-        throw std::runtime_error("invalid operator");
-
-        // todo: throw expr_eval_exception with proper error, expr and part_idx
+        throw std::runtime_error("invalid operands");
     }
 
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
@@ -1220,7 +1209,6 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                         throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                     }
                     else if (method.name == "resize") {
-                        // todo: support multiple arguments
                         auto eval = evaluate_expression(*args.nested);
                         if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                         auto s = eval->to_string();
@@ -1406,8 +1394,7 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
                     rhs_eval = rhs_eval->apply_unary_operator(op.type);
                 }
                 catch (std::exception &e) {
-                    std::cout << "unary operator error: " << e.what() << "\n";
-                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                    throw expr_eval_exception(e.what(), expr, op_ctx.part_idx);
                 }
                 eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
             }
@@ -1422,8 +1409,7 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
                     rhs_eval = lhs_eval->apply_binary_operator(op.type, std::move(rhs_eval));
                 }
                 catch (std::exception &e) {
-                    std::cout << "binary operator error: " << e.what() << "\n";
-                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                    throw expr_eval_exception(e.what(), expr, op_ctx.part_idx);
                 }
                 lhs_eval = nullptr;
                 eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
