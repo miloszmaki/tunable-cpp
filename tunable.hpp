@@ -65,6 +65,12 @@ struct is_in_streamable<T, std::void_t<decltype(std::cin >> *(T*)1)>> : std::tru
     template <typename T> \
     struct has_unary_operator_##name <T, std::void_t<decltype(op(*(T*)1))>> : std::true_type {};
 
+#define  _tunable_unary_postfix_operator_checker(op, name) \
+    template <typename T, class = void> \
+    struct has_unary_postfix_operator_##name : std::false_type {}; \
+    template <typename T> \
+    struct has_unary_postfix_operator_##name <T, std::void_t<decltype((*(T*)1)op)>> : std::true_type {};
+
 _tunable_unary_operator_checker(+, plus)
 _tunable_unary_operator_checker(-, minus)
 _tunable_unary_operator_checker(~, bit_neg)
@@ -73,7 +79,10 @@ _tunable_unary_operator_checker(--, decr)
 _tunable_unary_operator_checker(!, neg)
 _tunable_unary_operator_checker(*, deref)
 _tunable_unary_operator_checker(&, addr)
+_tunable_unary_postfix_operator_checker(++, post_incr)
+_tunable_unary_postfix_operator_checker(--, post_decr)
 
+#undef _tunable_unary_postfix_operator_checker
 #undef _tunable_unary_operator_checker
 
 #define  _tunable_binary_operator_checker(op, name) \
@@ -614,7 +623,7 @@ public:
     virtual std::optional<std::string> to_string() const = 0;
     virtual expr_eval_ptr create_var(std::string const& name) = 0;
     virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const = 0;
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type) = 0;
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) = 0;
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) = 0;
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) = 0;
 
@@ -654,7 +663,7 @@ public:
     virtual std::optional<std::string> to_string() const { return "undefined"; }
     virtual expr_eval_ptr create_var(std::string const& name) { throw std::runtime_error("cannot create variable from undefined"); }
     virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const { return std::nullopt; }
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type) { throw std::runtime_error("operator cannot be applied on undefined"); }
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) { throw std::runtime_error("operator cannot be applied on undefined"); }
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
         if (type != "=") throw std::runtime_error("operator cannot be applied on undefined");
         return rhs->create_var(name);
@@ -780,7 +789,18 @@ public:
 
     virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const;
 
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type) {
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) {
+#define _tunable_apply_unary_postfix_op(op, name) \
+        if constexpr (has_unary_postfix_operator_##name<T>::value) { \
+            if (type == #op) { \
+                using _TO = decltype((*ptr)op); \
+                using TO = typename std::remove_reference_t<_TO>; \
+                constexpr int op_addr_recursion = std::is_same_v<TO, T> ? addr_recursion : 0; \
+                if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
+                return expr_evaluation::make_rvalue<TO, op_addr_recursion>((*ptr)op); \
+            } \
+        }
+
 #define _tunable_apply_unary_op(op, name) \
         if constexpr (has_unary_operator_##name<T>::value) { \
             if (type == #op) { \
@@ -794,6 +814,14 @@ public:
                 else return expr_evaluation::make_rvalue<TO, op_addr_recursion>(op(*ptr)); \
             } \
         }
+
+        if (side == operator_side::postfix) {
+            _tunable_apply_unary_postfix_op(++, post_incr)
+            _tunable_apply_unary_postfix_op(--, post_decr)
+
+            throw std::runtime_error("invalid operand");
+        }
+
         _tunable_apply_unary_op(+, plus)
         _tunable_apply_unary_op(-, minus)
         _tunable_apply_unary_op(~, bit_neg)
@@ -816,15 +844,16 @@ public:
             }
         }
 
-
 #undef _tunable_apply_unary_op
+#undef _tunable_apply_unary_postfix_op
+
         throw std::runtime_error("invalid operand");
     }
 
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
         if (rhs->is<T>()) {
             auto eval = apply_binary_op<T,T,addr_recursion>(type, *ptr, rhs->value<T>(), is_rvalue());
-            if (!eval) throw std::runtime_error("invalid operator");
+            if (!eval) throw std::runtime_error("invalid operands");
             return std::move(*eval);
         }
 
@@ -1383,22 +1412,7 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
         auto &part = expr.parts[op_ctx.part_idx];
         if (std::holds_alternative<expr_operator>(part)) {
             auto& op = std::get<expr_operator>(part);
-            if (op_ctx.part_idx == 0 || std::holds_alternative<expr_operator>(expr.parts[op_ctx.part_idx - 1])) { // unary operator
-                auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
-                if (rhs_eval_idx < 0)
-                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
-                auto& rhs_eval = evals[rhs_eval_idx];
-                if (rhs_eval->is<undefined_type>())
-                    throw expr_eval_exception(expr_eval_error::undefined, expr, op_ctx.part_idx);
-                try {
-                    rhs_eval = rhs_eval->apply_unary_operator(op.type);
-                }
-                catch (std::exception &e) {
-                    throw expr_eval_exception(e.what(), expr, op_ctx.part_idx);
-                }
-                eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
-            }
-            else { // binary operator
+            if (op_ctx.side == operator_side::inner) { // binary operator
                 auto lhs_eval_idx = eval_idxs[op_ctx.part_idx - 1];
                 auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
                 if (lhs_eval_idx < 0 || rhs_eval_idx < 0)
@@ -1415,6 +1429,21 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
                 eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
                 for (int i = op_ctx.part_idx - 1; i >= 0 && eval_idxs[i] == lhs_eval_idx; i--)
                     eval_idxs[i] = rhs_eval_idx;
+            }
+            else { // unary operator
+                auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
+                if (rhs_eval_idx < 0)
+                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                auto& rhs_eval = evals[rhs_eval_idx];
+                if (rhs_eval->is<undefined_type>())
+                    throw expr_eval_exception(expr_eval_error::undefined, expr, op_ctx.part_idx);
+                try {
+                    rhs_eval = rhs_eval->apply_unary_operator(op.type, op_ctx.side);
+                }
+                catch (std::exception &e) {
+                    throw expr_eval_exception(e.what(), expr, op_ctx.part_idx);
+                }
+                eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
             }
         }
     }
