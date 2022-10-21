@@ -1444,19 +1444,20 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
                     eval_idxs[i] = rhs_eval_idx;
             }
             else { // unary operator
-                auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
-                if (rhs_eval_idx < 0)
+                const int side = (op_ctx.side == operator_side::prefix) ? 1 : -1;
+                auto side_eval_idx = eval_idxs[op_ctx.part_idx + side];
+                if (side_eval_idx < 0)
                     throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
-                auto& rhs_eval = evals[rhs_eval_idx];
-                if (rhs_eval->is<undefined_type>())
+                auto& side_eval = evals[side_eval_idx];
+                if (side_eval->is<undefined_type>())
                     throw expr_eval_exception(expr_eval_error::undefined, expr, op_ctx.part_idx);
                 try {
-                    rhs_eval = rhs_eval->apply_unary_operator(op.type, op_ctx.side);
+                    side_eval = side_eval->apply_unary_operator(op.type, op_ctx.side);
                 }
                 catch (std::exception &e) {
                     throw expr_eval_exception(e.what(), expr, op_ctx.part_idx);
                 }
-                eval_idxs[op_ctx.part_idx] = rhs_eval_idx;
+                eval_idxs[op_ctx.part_idx] = side_eval_idx;
             }
         }
     }
