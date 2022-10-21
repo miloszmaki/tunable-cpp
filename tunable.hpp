@@ -47,6 +47,15 @@ namespace _tunable_impl {
 // otherwise it would be compiling infinitely
 constexpr int max_addr_recursion = 1;
 
+void _check(bool condition, std::string text, int line) {
+    if (!condition)
+        throw std::runtime_error(
+            "Check failed in line " + std::to_string(line) + ": " + text + "\n"
+            + "If you see this message, it means there is a bug in tunable-cpp.\n"
+            + "Please report it at https://github.com/miloszmaki/tunable-cpp/issues");
+}
+#define _tunable_check(condition) _check(condition, #condition, __LINE__)
+
 namespace { // helpers
 
 template <typename T, class = void>
@@ -1187,7 +1196,7 @@ std::optional<expr_eval_ptr> expr_eval_typed<T, addr_recursion>::get_member_var(
     auto var = member_vars<T>::find_member(name);
     if (!var) return std::nullopt;
     auto var_eval = var->get_var_eval(*ptr);
-    if (!var_eval) throw std::runtime_error("impossible");
+    _tunable_check(var_eval != nullptr);
     return var_eval;
 }
 
@@ -1341,9 +1350,9 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
             auto type = tunable_types::find_type_of_var(prefix);
             if (!type) return std::nullopt;
             auto opt_var_eval = type->get_var_eval(prefix);
-            if (!opt_var_eval) throw std::runtime_error("impossible");
+            _tunable_check(opt_var_eval.has_value());
             auto var_eval = std::move(*opt_var_eval);
-            if (!var_eval) throw std::runtime_error("impossible");
+            _tunable_check(var_eval != nullptr);
             // evaluate suffix (member variables and specialized operators and methods)
             try {
                 while (suffix_idx < expr.parts.size()) {
@@ -1421,17 +1430,24 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
 
     // evaluate operators according to precedence
     for (auto &op_ctx : precedence) {
+        _tunable_check(op_ctx.part_idx >= 0 && op_ctx.part_idx < eval_idxs.size());
         if (eval_idxs[op_ctx.part_idx] >= 0) continue;
         auto &part = expr.parts[op_ctx.part_idx];
         if (std::holds_alternative<expr_operator>(part)) {
             auto& op = std::get<expr_operator>(part);
             if (op_ctx.side == operator_side::inner) { // binary operator
+                _tunable_check(op_ctx.part_idx-1 >= 0);
+                _tunable_check(op_ctx.part_idx+1 < eval_idxs.size());
                 auto lhs_eval_idx = eval_idxs[op_ctx.part_idx - 1];
                 auto rhs_eval_idx = eval_idxs[op_ctx.part_idx + 1];
                 if (lhs_eval_idx < 0 || rhs_eval_idx < 0)
                     throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                _tunable_check(lhs_eval_idx < evals.size());
+                _tunable_check(rhs_eval_idx < evals.size());
                 auto& lhs_eval = evals[lhs_eval_idx];
                 auto& rhs_eval = evals[rhs_eval_idx];
+                _tunable_check(lhs_eval != nullptr);
+                _tunable_check(rhs_eval != nullptr);
                 try {
                     rhs_eval = lhs_eval->apply_binary_operator(op.type, std::move(rhs_eval));
                 }
@@ -1445,10 +1461,14 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
             }
             else { // unary operator
                 const int side = (op_ctx.side == operator_side::prefix) ? 1 : -1;
-                auto side_eval_idx = eval_idxs[op_ctx.part_idx + side];
+                const auto side_part_idx = op_ctx.part_idx + side;
+                _tunable_check(side_part_idx >= 0 && side_part_idx < eval_idxs.size());
+                auto side_eval_idx = eval_idxs[side_part_idx];
                 if (side_eval_idx < 0)
                     throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                _tunable_check(side_eval_idx < evals.size());
                 auto& side_eval = evals[side_eval_idx];
+                _tunable_check(side_eval != nullptr);
                 if (side_eval->is<undefined_type>())
                     throw expr_eval_exception(expr_eval_error::undefined, expr, op_ctx.part_idx);
                 try {
@@ -1604,6 +1624,8 @@ private:
         return cmd_handling_result::processed;
     }
 };
+
+#undef _tunable_check
 
 } // namespace _tunable_impl
 
