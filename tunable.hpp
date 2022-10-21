@@ -819,7 +819,7 @@ public:
             _tunable_apply_unary_postfix_op(++, post_incr)
             _tunable_apply_unary_postfix_op(--, post_decr)
 
-            throw std::runtime_error("invalid operand");
+            throw std::runtime_error("no operator for this operand");
         }
 
         _tunable_apply_unary_op(+, plus)
@@ -847,13 +847,13 @@ public:
 #undef _tunable_apply_unary_op
 #undef _tunable_apply_unary_postfix_op
 
-        throw std::runtime_error("invalid operand");
+        throw std::runtime_error("no operator for this operand");
     }
 
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
         if (rhs->is<T>()) {
             auto eval = apply_binary_op<T,T,addr_recursion>(type, *ptr, rhs->value<T>(), is_rvalue());
-            if (!eval) throw std::runtime_error("invalid operands");
+            if (!eval) throw std::runtime_error("no operator for these operands");
             return std::move(*eval);
         }
 
@@ -871,7 +871,7 @@ public:
             return make_lvalue<T, addr_recursion>(*ptr);
         }
 
-        throw std::runtime_error("invalid operands");
+        throw std::runtime_error("no operator for these operands");
     }
 
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
