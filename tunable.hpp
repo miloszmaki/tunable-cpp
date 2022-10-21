@@ -165,6 +165,19 @@ inline bool is_integer(std::string const& s) {
     return is_decimal(s) || is_hex(s);
 }
 
+inline std::string escape(std::string const& s) {
+    static const std::map<char, char> escapes{
+        {'\n', 'n'}, {'\t', 't'}, {'\v', 'v'}, {'\b', 'b'},
+        {'\r', 'r'}, {'\f', 'f'}, {'\a', 'a'}, {'\0', '0'}};
+    std::string r;
+    for (size_t i = 0; i < s.size(); i++) {
+        auto it = escapes.find(s[i]);
+        if (it == escapes.end()) r += s[i];
+        else r += '\\', r += it->second;
+    }
+    return r;
+}
+
 inline std::string unescape(std::string s) {
     static const std::map<char, char> escapes{
         {'n', '\n'}, {'t', '\t'}, {'v', '\v'}, {'b', '\b'},
@@ -1560,7 +1573,10 @@ private:
                 auto value = evaluate_expression(expr);
                 if (value) {
                     auto val_str = value->to_string();
-                    if (val_str) std::cout << name << "=" << *val_str << "\n";
+                    if (val_str) {
+                        std::string q = value->is<std::string>() ? "\"" : "";
+                        std::cout << name << "=" << q << escape(*val_str) << q << "\n";
+                    }
                 }
             }
             return cmd_handling_result::processed;
