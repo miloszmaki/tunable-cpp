@@ -9,4 +9,7 @@ add_executable(example4 examples/example4.cpp)
 
 include_directories(".")
 
-set (CMAKE_CXX_STANDARD 17)
+target_compile_features(example1 PRIVATE cxx_std_17)
+target_compile_features(example2 PRIVATE cxx_std_17)
+target_compile_features(example3 PRIVATE cxx_std_17)
+target_compile_features(example4 PRIVATE cxx_std_17)

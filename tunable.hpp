@@ -91,6 +91,12 @@ _tunable_unary_operator_checker(&, addr)
 _tunable_unary_postfix_operator_checker(++, post_incr)
 _tunable_unary_postfix_operator_checker(--, post_decr)
 
+// bool fix for Clang
+template <> struct has_unary_operator_incr<bool> : std::false_type {};
+template <> struct has_unary_operator_decr<bool> : std::false_type {};
+template <> struct has_unary_postfix_operator_post_incr<bool> : std::false_type {};
+template <> struct has_unary_postfix_operator_post_decr<bool> : std::false_type {};
+
 #undef _tunable_unary_postfix_operator_checker
 #undef _tunable_unary_operator_checker
 
@@ -1386,6 +1392,7 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
                     case expr_const_type::_char: return expr_evaluation::make_rvalue_from_string<char>(cnst.value);
                     case expr_const_type::_string: return expr_evaluation::make_rvalue_from_string<std::string>(cnst.value);
                     case expr_const_type::_nullptr: return expr_evaluation::make_rvalue(nullptr);
+                    case expr_const_type::empty: _tunable_check(false); break;
                 }
             }
             catch (std::exception &e) {}
