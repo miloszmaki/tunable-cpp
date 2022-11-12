@@ -550,8 +550,6 @@ struct operator_context {
 };
 
 std::vector<operator_context> compute_precedence(expression const& expr) {
-    std::vector<operator_context> precedence;
-
     using op_prec_assoc_map = std::map<std::string, std::pair<int, int>>;
     static const op_prec_assoc_map inner_op_prec_assoc {
         {"::", {1, 1}},
@@ -586,13 +584,14 @@ std::vector<operator_context> compute_precedence(expression const& expr) {
         {"&", {3, -1}},
     };
 
-    bool prev_part_is_operand = false;
+    std::vector<operator_context> precedence;
+    auto add_op_context = [&](size_t i, operator_side side, std::pair<int, int> prec_assoc) {
+        precedence.emplace_back(operator_context{i, side, prec_assoc.first, prec_assoc.second});
+    };
+
     for (size_t i=0; i<expr.parts.size(); i++) {
         auto& part = expr.parts[i];
-        if (!std::holds_alternative<expr_operator>(part)) {
-            prev_part_is_operand = true;
-            continue;
-        }
+        if (!std::holds_alternative<expr_operator>(part)) continue;
         auto& op = std::get<expr_operator>(part);
 
         auto inner_op_it = inner_op_prec_assoc.find(op.type);
@@ -602,27 +601,22 @@ std::vector<operator_context> compute_precedence(expression const& expr) {
         bool is_postfix_op = postfix_op_it != postfix_op_prec_assoc.end();
         bool is_prefix_op = prefix_op_it != prefix_op_prec_assoc.end();
 
-        bool next_part_is_operand = (i+1 < expr.parts.size()) && !std::holds_alternative<expr_operator>(expr.parts[i+1]);
+        bool prev_part_exists = i > 0;
+        bool next_part_exists = i+1 < expr.parts.size();
 
-        operator_side side;
-        std::pair<int, int> prec_assoc;
+        auto prec_size = precedence.size();
 
-        if (is_postfix_op && prev_part_is_operand && !next_part_is_operand) {
-            side = operator_side::postfix;
-            prec_assoc = postfix_op_it->second;
+        if (is_postfix_op && prev_part_exists) {
+            add_op_context(i, operator_side::postfix, postfix_op_it->second);
         }
-        else if (is_prefix_op && next_part_is_operand && !prev_part_is_operand) {
-            side = operator_side::prefix;
-            prec_assoc = prefix_op_it->second;
+        if (is_prefix_op && next_part_exists) {
+            add_op_context(i, operator_side::prefix, prefix_op_it->second);
         }
-        else if (is_inner_op) {
-            side = operator_side::inner;
-            prec_assoc = inner_op_it->second;
+        if (is_inner_op && prev_part_exists && next_part_exists) {
+            add_op_context(i, operator_side::inner, inner_op_it->second);
         }
-        else throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, i);
-
-        precedence.emplace_back(operator_context{i, side, prec_assoc.first, prec_assoc.second});
-        prev_part_is_operand = false;
+        if (prec_size == precedence.size())
+            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, i);
     }
 
     std::sort(precedence.begin(), precedence.end());
@@ -1471,8 +1465,12 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
                 const auto side_part_idx = op_ctx.part_idx + side;
                 _tunable_check(side_part_idx >= 0 && side_part_idx < eval_idxs.size());
                 auto side_eval_idx = eval_idxs[side_part_idx];
-                if (side_eval_idx < 0)
-                    throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, op_ctx.part_idx);
+                if (side_eval_idx < 0) continue; // the operand side was not evaluated
+                const auto other_side_part_idx = op_ctx.part_idx - side;
+                if (other_side_part_idx >= 0 && other_side_part_idx < eval_idxs.size()
+                    && eval_idxs[other_side_part_idx] >= 0) {
+                    continue; // the other side is also a value, so this must be a binary operator
+                }
                 _tunable_check(side_eval_idx < evals.size());
                 auto& side_eval = evals[side_eval_idx];
                 _tunable_check(side_eval != nullptr);
@@ -1489,9 +1487,13 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
         }
     }
 
-    if (eval_idxs.empty() || eval_idxs[0] < 0 || evals.empty())
-        throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+    // check if all parts were evaluated
+    for (size_t i=0; i<expr.parts.size(); ++i) {
+        if (eval_idxs[i] < 0)
+            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, i);
+    }
 
+    _tunable_check(eval_idxs[0] < evals.size());
     return std::move(evals[eval_idxs[0]]);
 }
 
