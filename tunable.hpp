@@ -1499,39 +1499,19 @@ inline expr_eval_ptr evaluate_expression(expression const& expr) {
 
 } // expression evaluation
 
-class interaction_loop
-{
+class initialization {
 public:
-    static void run() {
-        init();
-        std::cout << "--- TUNABLE BEGIN ---\n";
-        print_help();
-        while (true) {
-            std::cout << "$ ";
-            std::string s;
-            std::getline(std::cin, s);
-            try {
-                auto result = handle_command(s);
-                if (result == cmd_handling_result::exit) break;
-                else if (result == cmd_handling_result::unrecognized)
-                    std::cout << "unrecognized command\n";
-            }
-            catch (parsing_exception &e) {
-                std::cout << "Parsing error: " << e.what() << "\n";
-            }
-            catch (expr_eval_exception &e) {
-                std::cout << "Expression evaluation error: " << e.what() << "\n";
-            }
-            catch (std::exception &e) {
-                std::cout << "Exception: " << e.what() << "\n";
-            }
-        }
-        std::cout << "--- TUNABLE END ---\n";
+    static initialization& ensure() {
+        static initialization instance;
+        return instance;
     }
-private:
-    enum class cmd_handling_result { unrecognized, empty, processed, exit };
 
-    static void init() {
+private:
+    initialization() {
+        init_operators();
+    }
+
+    void init_operators() {
 #define _tunable_register_binary_op_types_numeric(i, T) \
         if constexpr(i < 1)  register_binary_op_types<T, char>(); \
         if constexpr(i < 2)  register_binary_op_types<T, signed char>(); \
@@ -1567,72 +1547,110 @@ private:
 
         register_binary_op_types<std::string, char>();
     }
+};
 
-    static void print_help() {
-        const int col = 20;
-        std::cout << "Special commands:\n" <<
-            std::setw(col) << ";q ;quit ;exit" << " - quit tunable command line\n" <<
-            std::setw(col) << ";h ;help" << " - show help\n" <<
-            std::setw(col) << ";vars" << " - show all variables\n" <<
-            std::setw(col) << ";values" << " - show all variables with values\n";
+namespace cmd {
+
+inline void print_help(std::ostream &out) {
+    const int col = 20;
+    out << "Special commands:\n" <<
+        std::setw(col) << ";q ;quit ;exit" << " - quit tunable command line\n" <<
+        std::setw(col) << ";h ;help" << " - show help\n" <<
+        std::setw(col) << ";vars" << " - show all variables\n" <<
+        std::setw(col) << ";values" << " - show all variables with values\n";
+}
+
+enum class handling_result { unrecognized, empty, processed, exit };
+
+inline handling_result handle_special_command(std::ostream &out, std::string const& s) {
+    if (s == "q" || s == "quit" || s == "exit")
+        return handling_result::exit;
+    if (s == "h" || s == "help") {
+        print_help(out);
+        return handling_result::processed;
     }
-
-    static cmd_handling_result handle_command(std::string const& s) {
-        if (s == "") return cmd_handling_result::empty;
-        if (s[0] == ';') return handle_special_command(s.substr(1));
-        return handle_expressions(s);
+    if (s == "vars") {
+        for (auto &[name,_] : tunable_types::get_var_types()) {
+            out << name << "\n";
+        }
+        return handling_result::processed;
     }
-
-    static cmd_handling_result handle_special_command(std::string const& s) {
-        if (s == "q" || s == "quit" || s == "exit")
-            return cmd_handling_result::exit;
-        if (s == "h" || s == "help") {
-            print_help();
-            return cmd_handling_result::processed;
-        }
-        if (s == "vars") {
-            for (auto &[name,_] : tunable_types::get_var_types()) {
-                std::cout << name << "\n";
-            }
-            return cmd_handling_result::processed;
-        }
-        if (s == "values") {
-            for (auto &[name,_] : tunable_types::get_var_types()) {
-                expression expr;
-                expr.parts.emplace_back(expr_variable{.name=name});
-                auto value = evaluate_expression(expr);
-                if (value) {
-                    auto val_str = value->to_string();
-                    if (val_str) {
-                        std::string q = value->is<std::string>() ? "\"" : "";
-                        std::cout << name << "=" << q << escape(*val_str) << q << "\n";
-                    }
+    if (s == "values") {
+        for (auto &[name,_] : tunable_types::get_var_types()) {
+            expression expr;
+            expr.parts.emplace_back(expr_variable{.name=name});
+            auto value = evaluate_expression(expr);
+            if (value) {
+                auto val_str = value->to_string();
+                if (val_str) {
+                    std::string q = value->is<std::string>() ? "\"" : "";
+                    out << name << "=" << q << escape(*val_str) << q << "\n";
                 }
             }
-            return cmd_handling_result::processed;
         }
-        return cmd_handling_result::unrecognized;
+        return handling_result::processed;
     }
+    return handling_result::unrecognized;
+}
 
-    static cmd_handling_result handle_expressions(std::string const& s) {
-        auto expressions = parse_expressions(s);
-        for (auto &expr : expressions) {
-            auto r = handle_expression(expr);
-            if (r != cmd_handling_result::processed) return r;
-        }
-        return cmd_handling_result::processed;
-    }
-
-    static cmd_handling_result handle_expression(expression const& expr) {
-        if (expr.parts.empty()) return cmd_handling_result::processed;
+inline handling_result handle_expression(std::ostream &out, expression const& expr) {
+    if (!expr.parts.empty()) {
         auto eval = evaluate_expression(expr);
         if (eval) {
             auto s = eval->to_string();
-            if (s) std::cout << *s << "\n";
+            if (s) out << *s << "\n";
         }
-        return cmd_handling_result::processed;
     }
-};
+    return handling_result::processed;
+}
+
+inline handling_result handle_expressions(std::ostream &out, std::string const& s) {
+    auto expressions = parse_expressions(s);
+    for (auto &expr : expressions) {
+        auto r = handle_expression(out, expr);
+        if (r != handling_result::processed) return r;
+    }
+    return handling_result::processed;
+}
+
+inline handling_result handle_command(std::ostream &out, std::string const& s) {
+    if (s == "") return handling_result::empty;
+    if (s[0] == ';') return handle_special_command(out, s.substr(1));
+    return handle_expressions(out, s);
+}
+
+inline bool execute_command(std::ostream &out, std::string const& s) {
+    try {
+        auto result = cmd::handle_command(out, s);
+        if (result == cmd::handling_result::exit) return false;
+        else if (result == cmd::handling_result::unrecognized)
+            out << "unrecognized command\n";
+    }
+    catch (parsing_exception &e) {
+        out << "Parsing error: " << e.what() << "\n";
+    }
+    catch (expr_eval_exception &e) {
+        out << "Expression evaluation error: " << e.what() << "\n";
+    }
+    catch (std::exception &e) {
+        out << "Exception: " << e.what() << "\n";
+    }
+    return true;
+}
+
+inline void run_interaction_loop() {
+    std::cout << "--- TUNABLE BEGIN ---\n";
+    cmd::print_help(std::cout);
+    while (true) {
+        std::cout << "$ ";
+        std::string s;
+        std::getline(std::cin, s);
+        if (!execute_command(std::cout, s)) break;
+    }
+    std::cout << "--- TUNABLE END ---\n";
+}
+
+} // namespace cmd
 
 #undef _tunable_check
 
@@ -1667,7 +1685,15 @@ private:
 #define tunable(x,...) _tunable(x, ##__VA_ARGS__, 2, 1)
 
 inline void tunable_cmd() {
-    _tunable_impl::interaction_loop::run();
+    _tunable_impl::initialization::ensure();
+    _tunable_impl::cmd::run_interaction_loop();
+}
+
+inline std::string tunable_eval(std::string const& expressions) {
+    _tunable_impl::initialization::ensure();
+    std::stringstream ss;
+    _tunable_impl::cmd::execute_command(ss, expressions);
+    return ss.str();
 }
 
 #endif
