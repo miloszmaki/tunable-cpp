@@ -1666,6 +1666,8 @@ private:
 // tunable(Class,x) - register member variable Class::x as tunable
 #define tunable(x,...) _tunable(x, ##__VA_ARGS__, 2, 1)
 
-#define tunablecmd() _tunable_impl::interaction_loop::run()
+inline void tunable_cmd() {
+    _tunable_impl::interaction_loop::run();
+}
 
 #endif

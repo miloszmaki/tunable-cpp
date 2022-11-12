@@ -17,7 +17,7 @@ Use `tunable(Class, x)` to capture member variable `Class::x` for all tunable in
 
 Optionally, for custom types you may overload the stream operators `<<` and `>>`. This enables printing and assigning them using custom syntax.
 
-Call `tunablecmd()` to enter the interactive command line.
+Call `tunable_cmd()` to enter the interactive command line.
 
 Possible run-time interactions:
 - read a variable
@@ -90,7 +90,7 @@ int main()
     tunable(tri);
 
     // view and modify tunables in command line
-    tunablecmd();
+    tunable_cmd();
 
     std::cout << "x=" << x << "\n";
     std::cout << "t=" << "{" << t[0] << ", " << t[1] << "}\n";

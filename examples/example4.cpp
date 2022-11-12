@@ -11,7 +11,7 @@ int main()
     tunable(c);
     tunable(i);
 
-    tunablecmd();
+    tunable_cmd();
 
     return 0;
 }

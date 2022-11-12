@@ -23,7 +23,7 @@ int main()
     tunable(Point, y);
     tunable(Circle, center);
     tunable(Circle, radius);
-    
+
     Point p1{1.5, -2.}, p2{-0.4, 3.2};
     tunable(p1);
     tunable(p2);
@@ -31,7 +31,7 @@ int main()
     Circle c{p1, 5.};
     tunable(c);
 
-    tunablecmd();
+    tunable_cmd();
 
     cout << "p1: " << p1 << endl;
     cout << "p2: " << p2 << endl;

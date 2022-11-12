@@ -23,11 +23,11 @@ int main()
 {
     tunable(Point, x);
     tunable(Point, y);
-    
+
     vector<Point> v{{0.,1.}, {2.,-0.5}};
     tunable(v);
 
-    tunablecmd();
+    tunable_cmd();
 
     return 0;
 }
@@ -46,10 +46,10 @@ $ ;values
 v={{0,1},{2,-0.5},}
 $ v.size()
 2
-$ v.resize(4)  
+$ v.resize(4)
 $ v
 {{0,1},{2,-0.5},{0,0},{0,0},}
-$ v.back()=v.front()                    
+$ v.back()=v.front()
 {0,1}
 $ v.push_back(v[1])
 $ v

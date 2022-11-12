@@ -17,8 +17,8 @@ int main()
 
     double numbers[] = {1.1, 2.2, 3.3};
     tunable(numbers);
-    
-    tunablecmd();
+
+    tunable_cmd();
 
     cout << "str:     " << str << endl;
     cout << "x:       " << x   << endl;
@@ -49,7 +49,7 @@ $ ++(++x)
 7
 $ out_of_scope
 undefined
-$ n=numbers 
+$ n=numbers
 0x7ffd5e971f00
 $ n[0];n[1];n[2]
 1.1
