@@ -8,14 +8,27 @@ void test(int line, std::string const& expr, std::string const& result) {
     if (eval != result) {
         cout << "--- Test failed (line " << line << ") ---\n";
         cout << "Expression: " << expr << "\n";
-        cout << "Result:     " << eval << "\n";
+        cout << "Evaluated:  " << eval << "\n";
         cout << "Expected:   " << result << "\n";
         exit(1);
     }
 }
 
+template<class LT, class RT>
+void check(int line, bool result, std::string const& op,
+           std::string const& lhs, LT const& lhs_eval,
+           std::string const& rhs, RT const& rhs_eval) {
+    if (result) return;
+    cout << "--- Check failed (line " << line << ") ---\n";
+    cout << "Expression: " << lhs << " " << op << " " << rhs << "\n";
+    cout << "Evaluated:  " << lhs_eval << " " << op << " " << rhs_eval << "\n";
+    exit(1);
+}
+
 void runTests() {
 #define TEST(expr, result) test(__LINE__, expr, result)
+#define CHECK_OP(lhs, op, rhs) check(__LINE__, (lhs op rhs), #op, #lhs, lhs, #rhs, rhs)
+#define CHECK(lhs, rhs) CHECK_OP(lhs, ==, rhs)
 
     TEST("2+2", "4");
     TEST("-10 -8", "-18");
@@ -48,15 +61,20 @@ void runTests() {
     TEST("x==y", "false");
     TEST("x<y", "true");
     TEST("x+0.4*y", "6.2");
+    CHECK(x, 3);
 
     tunable_eval("p=&x");
     TEST("*p", "3");
     TEST("++*p", "4");
     TEST("x", "4");
+    CHECK(x, 4);
 
     TEST("x++y", "Expression evaluation error: invalid syntax\nx++y\n ^^");
     TEST("x++--", "Expression evaluation error: can't modify an rvalue\nx++--\n   ^^");
+    CHECK(x, 4);
 
+#undef CHECK
+#undef CHECK_OP
 #undef TEST
 }
 
