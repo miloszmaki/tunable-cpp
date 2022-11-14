@@ -47,7 +47,7 @@ namespace _tunable_impl {
 // otherwise it would be compiling infinitely
 constexpr int max_addr_recursion = 1;
 
-void _check(bool condition, std::string text, int line) {
+inline void _check(bool condition, std::string text, int line) {
     if (!condition)
         throw std::runtime_error(
             "Check failed in line " + std::to_string(line) + ": " + text + "\n"
@@ -228,14 +228,14 @@ bool from_string(T& ref, std::string const& s) {
 }
 
 template <>
-bool from_string(std::string& ref, std::string const& s) {
+inline bool from_string(std::string& ref, std::string const& s) {
     if (is_quoted(s)) ref = unescape(s.substr(1, s.size()-2));
     else ref = s;
     return true;
 }
 
 template <>
-bool from_string(char& ref, std::string const& s) {
+inline bool from_string(char& ref, std::string const& s) {
     if (std::regex_match(s, reg_char)) {
         auto p = unescape(s.substr(1, s.size()-2));
         if (p.size() != 1) return false;
@@ -248,7 +248,7 @@ bool from_string(char& ref, std::string const& s) {
 }
 
 template <>
-bool from_string(bool& ref, std::string const& s) {
+inline bool from_string(bool& ref, std::string const& s) {
     if (is_integer(s)) {
         long long i;
         if (!from_string(i, s)) return false;
@@ -288,7 +288,7 @@ std::optional<std::string> stringify(T const& ref) {
 }
 
 template <>
-std::optional<std::string> stringify(bool const& ref) {
+inline std::optional<std::string> stringify(bool const& ref) {
     return ref ? "true" : "false";
 }
 
@@ -358,7 +358,7 @@ struct expression {
     }
 };
 
-std::string expr_brackets::to_string() const {
+inline std::string expr_brackets::to_string() const {
     std::string s;
     s += type; // opening bracket
     if (nested) s += nested->to_string();
@@ -389,7 +389,7 @@ private:
     std::string msg;
 };
 
-void expression::parse(char const* s, size_t& i) {
+inline void expression::parse(char const* s, size_t& i) {
     auto reg_flags = std::regex_constants::match_continuous;
     std::cmatch cm;
 
@@ -461,7 +461,7 @@ void expression::parse(char const* s, size_t& i) {
     }
 }
 
-std::vector<expression> parse_expressions(std::string const& s) {
+inline std::vector<expression> parse_expressions(std::string const& s) {
     std::vector<expression> expressions;
     expressions.emplace_back();
     auto cs = s.c_str();
@@ -544,7 +544,7 @@ struct operator_context {
     }
 };
 
-std::vector<operator_context> compute_precedence(expression const& expr) {
+inline std::vector<operator_context> compute_precedence(expression const& expr) {
     using op_prec_assoc_map = std::map<std::string, std::pair<int, int>>;
     static const op_prec_assoc_map inner_op_prec_assoc {
         {"::", {1, 1}},
@@ -1349,7 +1349,7 @@ void register_binary_op_types() {
 }
 
 // process prefix parts of name split by operators (`.`, `->` and `::`) and brackets
-std::optional<expr_eval_result> process_var_name_prefixes(expression const& expr, size_t part_idx, std::function<std::optional<expr_eval_result>(std::string const&, size_t)> func) {
+inline std::optional<expr_eval_result> process_var_name_prefixes(expression const& expr, size_t part_idx, std::function<std::optional<expr_eval_result>(std::string const&, size_t)> func) {
     std::string name;
     for (size_t i = part_idx; i < expr.parts.size(); i++) {
         auto &p = expr.parts[i];
