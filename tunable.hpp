@@ -776,12 +776,12 @@ private:
     inline static std::map<std::type_index, op_func> op_funcs;
 };
 
-template <class T, int addr_recursion = 0>
-class expr_eval_typed : public expr_evaluation {
+template <class T>
+class expr_eval_typed_base : public expr_evaluation {
 public:
-    expr_eval_typed(T* ptr, bool owned, bool constant, bool value_is_ptr) : expr_evaluation(constant), ptr(ptr), owned(owned), value_is_ptr(value_is_ptr) {}
+    expr_eval_typed_base(T* ptr, bool owned, bool constant, bool value_is_ptr) : expr_evaluation(constant), ptr(ptr), owned(owned), value_is_ptr(value_is_ptr) {}
 
-    virtual ~expr_eval_typed() {
+    virtual ~expr_eval_typed_base() {
         if (owned && ptr) delete ptr;
     }
 
@@ -794,6 +794,33 @@ public:
     virtual std::optional<std::string> to_string() const {
         return stringify(*ptr);
     }
+
+    virtual expr_eval_ptr create_var(std::string const& name) = 0;
+
+    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const;
+
+    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) = 0;
+    virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) = 0;
+
+    virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
+
+protected:
+    T* ptr = nullptr;
+    bool owned = false, value_is_ptr = false;
+};
+
+template <class T, int addr_recursion = 0>
+class expr_eval_typed : public expr_eval_typed_base<T> {
+public:
+    expr_eval_typed(T* ptr, bool owned, bool constant, bool value_is_ptr) : expr_eval_typed_base<T>(ptr, owned, constant, value_is_ptr) {}
+
+    virtual ~expr_eval_typed() {}
+
+    using expr_eval_typed_base<T>::ptr;
+    using expr_eval_typed_base<T>::owned;
+    using expr_eval_typed_base<T>::value_is_ptr;
+    using expr_eval_typed_base<T>::value;
+    using expr_evaluation::is_rvalue;
 
     virtual expr_eval_ptr create_var(std::string const& name) {
         T* ptr2 = nullptr;
@@ -808,8 +835,6 @@ public:
         tunable_factory::create<T, addr_recursion>(ref2, name);
         return expr_evaluation::make_lvalue<T, addr_recursion>(ref2);
     }
-
-    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const;
 
     virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) {
 #define _tunable_apply_unary_postfix_op(op, name) \
@@ -890,22 +915,16 @@ public:
             if (!str) throw std::runtime_error("serialization error");
             // deserialize
             if (!from_string(*ptr, *str)) throw std::runtime_error("deserialization error");
-            return make_lvalue<T, addr_recursion>(*ptr);
+            return expr_evaluation::make_lvalue<T, addr_recursion>(*ptr);
         }
 
         throw std::runtime_error("no operator for these operands");
     }
-
-    virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
-
-private:
-    T* ptr = nullptr;
-    bool owned = false, value_is_ptr = false;
 };
 
 template <class T>
-T const& expr_evaluation::value() const{
-    return reinterpret_cast<expr_eval_typed<T> const*>(this)->value();
+T const& expr_evaluation::value() const {
+    return reinterpret_cast<expr_eval_typed_base<T> const*>(this)->value();
 }
 
 template <class T, int addr_recursion>
@@ -1191,8 +1210,8 @@ std::optional<expr_eval_result> process_var_name_prefixes(expression const& expr
 
 expr_eval_ptr evaluate_expression(expression const& expr);
 
-template <class T, int addr_recursion>
-std::optional<expr_eval_ptr> expr_eval_typed<T, addr_recursion>::get_member_var(std::string const& name) const {
+template <class T>
+std::optional<expr_eval_ptr> expr_eval_typed_base<T>::get_member_var(std::string const& name) const {
     auto var = member_vars<T>::find_member(name);
     if (!var) return std::nullopt;
     auto var_eval = var->get_var_eval(*ptr);
@@ -1299,30 +1318,29 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
 
 template <class T>
 std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression const& expr, size_t part_idx) {
-    auto &part = expr.parts[part_idx];
-    if (std::holds_alternative<expr_operator>(part)) {
-        auto &op = std::get<expr_operator>(part).type;
-        if (op == "->") {
-            return evaluate_var_member(expr_evaluation::make_lvalue(*ref), expr, part_idx + 1);
+    if constexpr (!std::is_pointer_v<T>) {
+        auto &part = expr.parts[part_idx];
+        if (std::holds_alternative<expr_operator>(part)) {
+            auto &op = std::get<expr_operator>(part).type;
+            if (op == "->") {
+                return evaluate_var_member(expr_evaluation::make_lvalue(*ref), expr, part_idx + 1);
+            }
         }
-    }
-    else if (std::holds_alternative<expr_brackets>(part)) {
-        auto &brackets = std::get<expr_brackets>(part);
-        if (brackets.type == '[' && brackets.nested) {
-            size_t unknown_size = -1;
-            auto eval = evaluate_subscript(ref, unknown_size, *brackets.nested);
-            return expr_eval_result{std::move(eval), part_idx + 1};
+        else if (std::holds_alternative<expr_brackets>(part)) {
+            auto &brackets = std::get<expr_brackets>(part);
+            if (brackets.type == '[' && brackets.nested) {
+                size_t unknown_size = -1;
+                auto eval = evaluate_subscript(ref, unknown_size, *brackets.nested);
+                return expr_eval_result{std::move(eval), part_idx + 1};
+            }
         }
     }
     return std::nullopt;
 }
 
-template <class T, int addr_recursion>
-std::optional<expr_eval_result> expr_eval_typed<T, addr_recursion>::evaluate_var_expression(expression const& expr, size_t part_idx) {
-    if constexpr (addr_recursion <= 1) {
-        return evaluate_typed_var_expr(*ptr, expr, part_idx);
-    }
-    return std::nullopt;
+template <class T>
+std::optional<expr_eval_result> expr_eval_typed_base<T>::evaluate_var_expression(expression const& expr, size_t part_idx) {
+    return evaluate_typed_var_expr(*ptr, expr, part_idx);
 }
 
 inline expr_eval_result evaluate_var_expression(expr_eval_ptr var, expression const& expr, size_t part_idx) {
