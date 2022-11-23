@@ -5,6 +5,7 @@ using namespace std;
 struct Point {
     double x{0.};
     double y{0.};
+    char name[4];
 };
 
 bool operator==(Point const& p1, Point const& p2) { return p1.x == p2.x && p1.y == p2.y; }
@@ -23,9 +24,23 @@ int main()
 {
     tunable(Point, x);
     tunable(Point, y);
+    tunable(Point, name);
 
     vector<Point> v{{0.,1.}, {2.,-0.5}};
     tunable(v);
+
+    v[0].name[0]='t';
+    v[0].name[1]='e';
+    v[0].name[2]='s';
+    v[0].name[3]='t';
+
+    v[1].name[0]='a';
+    v[1].name[1]='b';
+    v[1].name[2]='c';
+    v[1].name[3]='d';
+
+    // todo:
+    // evaluating v[0].name[0] crashes at runtime, because the deferred implementation is not finished (specifically for the subscript)
 
     tunable_cmd();
 

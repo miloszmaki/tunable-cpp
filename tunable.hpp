@@ -95,6 +95,9 @@ template <> struct has_unary_operator_decr<bool> : std::false_type {};
 template <> struct has_unary_postfix_operator_post_incr<bool> : std::false_type {};
 template <> struct has_unary_postfix_operator_post_decr<bool> : std::false_type {};
 
+// nullptr_t fix
+template <> struct has_unary_operator_addr<std::nullptr_t> : std::false_type {};
+
 #undef _tunable_unary_postfix_operator_checker
 #undef _tunable_unary_operator_checker
 
@@ -615,15 +618,39 @@ std::vector<operator_context> compute_precedence(expression const& expr) {
     return precedence;
 }
 
+template <class T>
+class deferred_ptr {
+public:
+    deferred_ptr(std::function<T*()> make_ptr) : make_ptr(make_ptr) {}
+    T* get() {
+        evaluate();
+        return ptr;
+    }
+    void free() {
+        if (ptr) delete ptr;
+    }
+private:
+    T* ptr = nullptr;
+    std::function<T*()> make_ptr;
+    bool evaluated = false;
+    void evaluate() {
+        if (evaluated) return;
+        ptr = make_ptr();
+        evaluated = true;
+        // todo: clean function??
+        // make_ptr = {}
+    }
+};
+
 class expr_evaluation;
-using expr_eval_ptr = std::unique_ptr<expr_evaluation>;
+using expr_eval_ptr = std::shared_ptr<expr_evaluation>;
 
 struct expr_eval_result {
     expr_eval_ptr ptr;
     size_t next_part_idx;
 };
 
-class expr_evaluation {
+class expr_evaluation : public/*protected*/ std::enable_shared_from_this<expr_evaluation> {
 public:
     expr_evaluation(bool rvalue) : rvalue(rvalue) {}
     virtual ~expr_evaluation() {}
@@ -631,20 +658,20 @@ public:
     bool is_rvalue() const { return rvalue; }
     virtual std::type_index type() const = 0;
     template <class T> bool is() const { return type() == std::type_index(typeid(T)); }
-    template <class T> T const& value() const;
+    template <class T> T& value();
 
     virtual bool is_ptr() const = 0;
-    virtual std::optional<std::string> to_string() const = 0;
+    virtual std::optional<std::string> to_string() = 0;
     virtual expr_eval_ptr create_var(std::string const& name) = 0;
-    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const = 0;
+    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) = 0;
     virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) = 0;
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) = 0;
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) = 0;
 
-    template <class T> static expr_eval_ptr make_lvalue(T& ref, addr_helper_id_t addr_helper_id);
-    template <class T> static expr_eval_ptr make_rvalue(T const& ref, addr_helper_id_t addr_helper_id);
-    template <class T> static expr_eval_ptr make_lvalue(T& ref);
-    template <class T> static expr_eval_ptr make_rvalue(T const& ref);
+    template <class T> static expr_eval_ptr make_lvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id);
+    template <class T> static expr_eval_ptr make_rvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id);
+    template <class T> static expr_eval_ptr make_lvalue(std::function<T*()> make_ptr);
+    template <class T> static expr_eval_ptr make_rvalue(std::function<T*()> make_ptr);
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s);
 
     static expr_eval_ptr make_void() { return {}; }
@@ -652,6 +679,9 @@ public:
 private:
     bool rvalue = false;
 };
+
+template <class T> T* lvalue_ptr(T& ref) { return &ref; }
+template <class T> T* rvalue_ptr(T const& ref) { return new T(ref); }
 
 // undefined type
 struct undefined_type {};
@@ -665,9 +695,9 @@ public:
     std::type_index type() const override { return typeid(undefined_type); }
 
     bool is_ptr() const override { return false; }
-    std::optional<std::string> to_string() const override { return "undefined"; }
+    std::optional<std::string> to_string() override { return "undefined"; }
     expr_eval_ptr create_var(std::string const& name) override { throw std::runtime_error("cannot create variable from undefined"); }
-    std::optional<expr_eval_ptr> get_member_var(std::string const& name) const override { return std::nullopt; }
+    std::optional<expr_eval_ptr> get_member_var(std::string const& name) override { return std::nullopt; }
     expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) override { throw std::runtime_error("operator cannot be applied on undefined"); }
     expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) override {
         if (type != "=") throw std::runtime_error("operator cannot be applied on undefined");
@@ -685,9 +715,9 @@ public:
     const addr_helper_id_t id;
     virtual addr_helper_id_t deref() const = 0;
     template <class T>
-    std::optional<expr_eval_ptr> addr_of(T* ptr) const {
+    std::optional<expr_eval_ptr> addr_of(expr_eval_ptr ptr) const {
         _tunable_check(is<T>());
-        return _addr_of(static_cast<void*>(ptr));
+        return _addr_of(std::move(ptr));
     }
 
 protected:
@@ -695,7 +725,7 @@ protected:
 
     template <class T> bool is() const { return type() == std::type_index(typeid(T)); }
     virtual std::type_index type() const = 0;
-    virtual std::optional<expr_eval_ptr> _addr_of(void* ptr) const = 0;
+    virtual std::optional<expr_eval_ptr> _addr_of(expr_eval_ptr ptr) const = 0;
 };
 
 class addr_helpers {
@@ -730,7 +760,7 @@ private:
     addr_helper() : addr_helper_base(addr_helpers::add(this)) {}
 
     std::type_index type() const override { return typeid(T); }
-    std::optional<expr_eval_ptr> _addr_of(void* ptr) const override;
+    std::optional<expr_eval_ptr> _addr_of(expr_eval_ptr ptr) const override;
 
     template <class>
     friend class addr_helper_factory;
@@ -766,10 +796,11 @@ addr_helper_id_t addr_helper<T, addr_recursion>::deref() const {
 }
 
 template <class T, int addr_recursion>
-std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::_addr_of(void* ptr) const {
+std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::_addr_of(expr_eval_ptr ptr) const {
     _tunable_check(has_unary_operator_addr<T>::value);
     if constexpr (has_unary_operator_addr<T>::value && addr_recursion < max_addr_recursion) {
-        return expr_evaluation::make_rvalue<T*>(&(*static_cast<T*>(ptr)),
+        return expr_evaluation::make_rvalue<T*>(
+            [ptr = std::move(ptr)]() { return rvalue_ptr(&(ptr->value<T>())); },
             addr_helper_factory<T*>::template get<addr_recursion + 1>());
     }
     return std::nullopt;
@@ -777,20 +808,27 @@ std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::_addr_of(void* ptr)
 
 // evaluation of binary operator for arbitrary types
 template <class TL, class TR>
-std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, TL& lhs, TR const& rhs, bool lhs_is_rvalue,
+std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, expr_eval_ptr lhs, expr_eval_ptr rhs,
                                              addr_helper_id_t lhs_addr_helper_id) {
+    _tunable_check(lhs->is<TL>());
+    _tunable_check(rhs->is<TR>());
+
 #define _tunable_apply_binary_op(op, name) \
     if constexpr (has_binary_operator_##name<TL,TR>::value) { \
         if (op_type == #op) { \
-            using _TO = decltype(lhs op rhs); \
-            using TO = typename std::remove_reference_t<_TO>; \
+            using _TO = decltype((*(TL*)1) op (*(TR*)1)); \
+            using TO = std::remove_reference_t<_TO>; \
             auto op_addr_helper_id = lhs_addr_helper_id; \
             if constexpr (!std::is_same_v<TO, TL>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if constexpr (std::is_lvalue_reference_v<_TO>) { \
-                if (lhs_is_rvalue) throw std::runtime_error("can't modify an rvalue"); \
-                return expr_evaluation::make_lvalue<TO>(lhs op rhs, op_addr_helper_id); \
+                if (lhs->is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
+                return expr_evaluation::make_lvalue<TO>( \
+                    [lhs, rhs]() { return lvalue_ptr(lhs->value<TL>() op ((TR const&)rhs->value<TR>())); }, \
+                    op_addr_helper_id); \
             } \
-            else return expr_evaluation::make_rvalue<TO>((TL const&)lhs op rhs, op_addr_helper_id); \
+            else return expr_evaluation::make_rvalue<TO>( \
+                    [lhs, rhs]() { return rvalue_ptr(((TL const&)lhs->value<TL>()) op ((TR const&)rhs->value<TR>())); }, \
+                    op_addr_helper_id); \
         } \
     }
 
@@ -841,46 +879,47 @@ public:
         std::type_index type = typeid(TR);
         if (op_funcs.count(type)) return;
 
-        op_funcs[type] = [](std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_rvalue) {
-            return apply_binary_op<TL,TR>(op_type, lhs, rhs->value<TR>(), lhs_is_rvalue, addr_helper_factory<TL>::get());
+        op_funcs[type] = [](std::string const& op_type, expr_eval_ptr lhs, expr_eval_ptr rhs) {
+            return apply_binary_op<TL,TR>(op_type, lhs, rhs, addr_helper_factory<TL>::get());
         };
     }
 
-    static std::optional<expr_eval_ptr> call(std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_rvalue) {
+    static std::optional<expr_eval_ptr> call(std::string const& op_type, expr_eval_ptr lhs, expr_eval_ptr rhs) {
+        _tunable_check(lhs->is<TL>());
         auto op_func_it = op_funcs.find(rhs->type());
         if (op_func_it == op_funcs.end()) return std::nullopt;
         auto &op_func = op_func_it->second;
-        return op_func(op_type, lhs, rhs, lhs_is_rvalue);
+        return op_func(op_type, lhs, rhs);
     }
 
 private:
-    using op_func = std::function<std::optional<expr_eval_ptr>(std::string const&, TL&, expr_eval_ptr const&, bool)>;
+    using op_func = std::function<std::optional<expr_eval_ptr>(std::string const&, expr_eval_ptr, expr_eval_ptr)>;
     inline static std::map<std::type_index, op_func> op_funcs;
 };
 
 template <class T>
 class expr_eval_typed : public expr_evaluation {
 public:
-    expr_eval_typed(T* ptr, bool owned, bool constant, addr_helper_id_t addr_helper_id)
-        : expr_evaluation(constant), ptr(ptr), owned(owned), addr_helper_id(addr_helper_id) {}
+    expr_eval_typed(std::function<T*()> make_ptr, bool owned, bool constant, addr_helper_id_t addr_helper_id)
+        : expr_evaluation(constant), ptr(make_ptr), owned(owned), addr_helper_id(addr_helper_id) {}
 
     virtual ~expr_eval_typed() {
-        if (owned && ptr) delete ptr;
+        if (owned) ptr.free();
     }
 
     std::type_index type() const override { return typeid(T); }
 
-    T const& value() const { return *ptr; }
+    T& value() { return *ptr.get(); }
 
     bool is_ptr() const override { return std::is_pointer_v<T>; }
 
-    std::optional<std::string> to_string() const override {
-        return stringify(*ptr);
+    std::optional<std::string> to_string() override {
+        return stringify(value());
     }
 
     expr_eval_ptr create_var(std::string const& name) override;
 
-    std::optional<expr_eval_ptr> get_member_var(std::string const& name) const override;
+    std::optional<expr_eval_ptr> get_member_var(std::string const& name) override;
 
     expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) override;
     expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) override;
@@ -888,24 +927,28 @@ public:
     std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) override;
 
 protected:
-    T* ptr = nullptr;
+    deferred_ptr<T> ptr;
     bool owned = false;
     const addr_helper_id_t addr_helper_id;
 };
 
 template <class T>
 expr_eval_ptr expr_eval_typed<T>::create_var(std::string const& name) {
-    T* ptr2 = nullptr;
-    if (owned) { // move
-        ptr2 = ptr;
-        owned = false; // prevent deletion
-    }
-    else { // copy
-        ptr2 = new T(value());
-    }
-    T& ref2 = *ptr2;
-    tunable_factory::create<T>(ref2, name, addr_helper_id);
-    return expr_evaluation::make_lvalue<T>(ref2, addr_helper_id);
+    return expr_evaluation::make_lvalue<T>(
+        [shared_this = shared_from_this(), name](){
+            auto *typed_this = static_cast<expr_eval_typed<T>*>(shared_this.get());
+            T* ptr2 = nullptr;
+            if (typed_this->owned) { // move
+                ptr2 = typed_this->ptr.get();
+                typed_this->owned = false; // prevent deletion
+            }
+            else { // copy
+                ptr2 = new T(typed_this->value());
+            }
+            T& ref2 = *ptr2;
+            tunable_factory::create<T>(ref2, name, typed_this->addr_helper_id);
+            return lvalue_ptr(ref2);
+        }, addr_helper_id);
 }
 
 template <class T>
@@ -913,27 +956,34 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
 #define _tunable_apply_unary_postfix_op(op, name) \
     if constexpr (has_unary_postfix_operator_##name<T>::value) { \
         if (type == #op) { \
-            using _TO = decltype((*ptr)op); \
-            using TO = typename std::remove_reference_t<_TO>; \
+            using _TO = decltype((*(T*)1)op); \
+            using TO = std::remove_reference_t<_TO>; \
             auto op_addr_helper_id = addr_helper_id; \
             if constexpr (!std::is_same_v<TO, T>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
-            return expr_evaluation::make_rvalue<TO>((*ptr)op, op_addr_helper_id); \
+            return expr_evaluation::make_rvalue<TO>( \
+                [shared_this = shared_from_this()](){ \
+                    return rvalue_ptr((shared_this->template value<T>())op); \
+                }, op_addr_helper_id); \
         } \
     }
 
 #define _tunable_apply_unary_op(op, name) \
     if constexpr (has_unary_operator_##name<T>::value) { \
         if (type == #op) { \
-            using _TO = decltype(op(*ptr)); \
-            using TO = typename std::remove_reference_t<_TO>; \
+            using _TO = decltype(op(*(T*)1)); \
+            using TO = std::remove_reference_t<_TO>; \
             auto op_addr_helper_id = addr_helper_id; \
             if constexpr (!std::is_same_v<TO, T>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if constexpr (std::is_lvalue_reference_v<_TO>) { \
                 if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
-                return expr_evaluation::make_lvalue<TO>(op(*ptr), op_addr_helper_id); \
+                return expr_evaluation::make_lvalue<TO>([shared_this = shared_from_this()](){ \
+                        return lvalue_ptr(op(shared_this->template value<T>())); \
+                    }, op_addr_helper_id); \
             } \
-            else return expr_evaluation::make_rvalue<TO>(op(*ptr), op_addr_helper_id); \
+            else return expr_evaluation::make_rvalue<TO>([shared_this = shared_from_this()](){ \
+                        return rvalue_ptr(op((T const&)shared_this->template value<T>())); \
+                    }, op_addr_helper_id); \
         } \
     }
 
@@ -951,18 +1001,23 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
     _tunable_apply_unary_op(--, decr)
     _tunable_apply_unary_op(!, neg)
 
-    if constexpr (has_unary_operator_deref<T>::value) {
-        using TO = typename std::remove_reference_t<decltype(*(*ptr))>;
-        if (type == "*") {
-            if (*ptr == nullptr) throw std::runtime_error("can't dereference null pointer");
-            return expr_evaluation::make_lvalue<TO>(*(*ptr), addr_helpers::get(addr_helper_id)->deref());
+        if constexpr (has_unary_operator_deref<T>::value) {
+            using TO = std::remove_reference_t<decltype(*(*(T*)1))>;// todo: same as decltype(*((T)1)) ?
+            if (type == "*") {
+                return expr_evaluation::make_lvalue<TO>(
+                    [shared_this = shared_from_this()](){
+                        auto &p = shared_this->template value<T>();
+                        if (p == nullptr) throw std::runtime_error("can't dereference null pointer");
+                        return lvalue_ptr(*p);
+                    },
+                    addr_helpers::get(addr_helper_id)->deref());
+            }
         }
-    }
 
     if constexpr (has_unary_operator_addr<T>::value) {
         if (type == "&") {
             if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
-            auto opt_eval = addr_helpers::get(addr_helper_id)->addr_of(ptr);
+            auto opt_eval = addr_helpers::get(addr_helper_id)->addr_of<T>(shared_from_this());
             if (opt_eval) return std::move(*opt_eval);
         }
     }
@@ -976,58 +1031,72 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
 template <class T>
 expr_eval_ptr expr_eval_typed<T>::apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
     if (rhs->is<T>()) {
-        auto eval = apply_binary_op<T,T>(type, *ptr, rhs->value<T>(), is_rvalue(), addr_helper_id);
+        auto eval = apply_binary_op<T,T>(type, shared_from_this(), rhs, addr_helper_id);
         if (!eval) throw std::runtime_error("no operator for these operands");
         return std::move(*eval);
     }
 
-    auto eval = binary_operators<T>::call(type, *ptr, rhs, is_rvalue());
+    auto eval = binary_operators<T>::call(type, shared_from_this(), rhs);
     if (eval) return std::move(*eval);
 
     if (type == "=") {
         if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
         if (is_ptr() && rhs->is_ptr())
             throw std::runtime_error("implicit casting of pointers of different type");
-        auto str = rhs->to_string(); // serialize
-        if (!str) throw std::runtime_error("serialization error");
-        // deserialize
-        if (!from_string(*ptr, *str)) throw std::runtime_error("deserialization error");
-        return expr_evaluation::make_lvalue<T>(*ptr, addr_helper_id);
+
+        // ensure serialization & deserialization makes sense for these operands
+        // before the expression gets evaluated
+        // todo: do this within rhs
+        //if constexpr (is_out_streamable<RHS_TYPE>::value) // todo: something more general?
+            //throw std::runtime_error("type does not allow for serialization");
+        if constexpr (!is_in_streamable<T>::value) // todo: something more general?
+            throw std::runtime_error("type does not allow for deserialization");
+
+        return expr_evaluation::make_lvalue<T>([shared_this = shared_from_this(), rhs](){
+            auto str = rhs->to_string(); // serialize
+            if (!str) throw std::runtime_error("serialization error");
+            // deserialize
+            auto& ref = shared_this->template value<T>();
+            if (!from_string(ref, *str)) throw std::runtime_error("deserialization error");
+            return lvalue_ptr(ref);
+        }, addr_helper_id);
     }
 
     throw std::runtime_error("no operator for these operands");
 }
 
 template <class T>
-T const& expr_evaluation::value() const {
-    return static_cast<expr_eval_typed<T> const*>(this)->value();
+T& expr_evaluation::value() {
+    return static_cast<expr_eval_typed<T>*>(this)->value();
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_lvalue(T& ref, addr_helper_id_t addr_helper_id) {
-    return std::make_unique<expr_eval_typed<T>>(&ref, false, false, addr_helper_id);
+expr_eval_ptr expr_evaluation::make_lvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id) {
+    return std::make_shared<expr_eval_typed<T>>(std::move(make_ptr), false, false, addr_helper_id);
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_rvalue(T const& ref, addr_helper_id_t addr_helper_id) {
-    return std::make_unique<expr_eval_typed<T>>(new T(ref), true, true, addr_helper_id);
+expr_eval_ptr expr_evaluation::make_rvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id) {
+    return std::make_shared<expr_eval_typed<T>>(std::move(make_ptr), true, true, addr_helper_id);
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_lvalue(T& ref) {
-    return make_lvalue(ref, addr_helper_factory<T>::get());
+expr_eval_ptr expr_evaluation::make_lvalue(std::function<T*()> make_ptr) {
+    return make_lvalue(std::move(make_ptr), addr_helper_factory<T>::get());
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_rvalue(T const& ref) {
-    return make_rvalue(ref, addr_helper_factory<T>::get());
+expr_eval_ptr expr_evaluation::make_rvalue(std::function<T*()> make_ptr) {
+    return make_rvalue(std::move(make_ptr), addr_helper_factory<T>::get());
 }
 
 template <class T>
 expr_eval_ptr expr_evaluation::make_rvalue_from_string(std::string const& s) {
-    T x;
-    if (!from_string(x, s)) throw std::runtime_error("deserialization error");
-    return make_rvalue(x);
+    return make_rvalue<T>([s](){
+        T* x = new T;
+        if (!from_string(*x, s)) throw std::runtime_error("deserialization error");
+        return x;
+    });
 }
 
 // holds a reference to a tunable variable
@@ -1115,7 +1184,12 @@ public:
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
         if (!var) return std::nullopt;
-        return expr_evaluation::make_lvalue<T>(var->ref, var->addr_helper_id);
+        return expr_evaluation::make_lvalue<T>(
+            [&self, name](){
+                auto var = self.find_var_typed(name);
+                _tunable_check(var);
+                return lvalue_ptr(var->ref);
+            }, var->addr_helper_id);
     }
 private:
     std::map<std::string, tunable<T>*> vars;
@@ -1213,8 +1287,9 @@ public:
         member_vars<T>::remove(name);
     }
     expr_eval_ptr get_var_eval(T& ref) override {
+         // todo: here probably we'll pass something different than T&
         auto& member_ref = get_ref(ref);
-        return expr_evaluation::make_lvalue(member_ref);
+        return expr_evaluation::make_lvalue<M>([&member_ref](){ return lvalue_ptr(member_ref); });
     }
 private:
     std::string name;
@@ -1237,7 +1312,10 @@ public:
     }
     expr_eval_ptr get_var_eval(T& ref) override {
         auto& member_ref = get_ref(ref);
-        return expr_evaluation::make_rvalue((M* const&)member_ref);
+        auto arr_ptr = (M* const&)member_ref;
+        return expr_evaluation::make_rvalue<M*>([arr_ptr](){
+            return rvalue_ptr(arr_ptr);
+        });
     }
 private:
     std::string name;
@@ -1304,10 +1382,10 @@ std::optional<expr_eval_result> process_var_name_prefixes(expression const& expr
 expr_eval_ptr evaluate_expression(expression const& expr);
 
 template <class T>
-std::optional<expr_eval_ptr> expr_eval_typed<T>::get_member_var(std::string const& name) const {
+std::optional<expr_eval_ptr> expr_eval_typed<T>::get_member_var(std::string const& name) {
     auto var = member_vars<T>::find_member(name);
     if (!var) return std::nullopt;
-    auto var_eval = var->get_var_eval(*ptr);
+    auto var_eval = var->get_var_eval(*ptr.get()); // todo: defer
     _tunable_check(var_eval != nullptr);
     return var_eval;
 }
@@ -1333,12 +1411,16 @@ template <class T>
 expr_eval_ptr evaluate_subscript(T& ref, size_t size, expression const& expr) {
     auto idx_eval = evaluate_expression(expr);
     if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
-    auto str = idx_eval->to_string();
-    if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
-    size_t idx = -1;
-    if (!is_integer(*str) || !from_string(idx, *str)) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
-    if (idx >= size) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
-    return expr_evaluation::make_lvalue(ref[idx]);
+    using elem_type = std::remove_reference_t<decltype((*(T*)1)[0])>;
+    return expr_evaluation::make_lvalue<elem_type>([&ref, idx_eval, size, &expr](){ // todo: size might change before deferred evaluation ?
+        auto str = idx_eval->to_string();
+        if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+        size_t idx = -1;
+        if (!is_integer(*str) || !from_string(idx, *str))
+            throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+        if (idx >= size) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
+        return lvalue_ptr(ref[idx]);
+    });
 }
 
 template <class T>
@@ -1365,9 +1447,16 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                             return expr_evaluation::make_void();
                         }
                         else { // implicit type conversion
-                            ref.emplace_back();
-                            if (binary_operators<T>::call("=", ref.back(), eval, false))
+                            auto assignment = binary_operators<T>::call("=",
+                                    expr_evaluation::make_lvalue<T>([&ref](){
+                                        ref.emplace_back();
+                                        return lvalue_ptr(ref.back());
+                                    }), eval);
+                            if (assignment.has_value()) {
+                                expr_eval_ptr& assign_eval = *assignment;
+                                auto assigned = assign_eval->value<T>(); // evaluate
                                 return expr_evaluation::make_void();
+                            }
                         }
                         throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                     }
@@ -1385,11 +1474,11 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                     }
                 }
                 else { // method without arguments
-                    if (method.name == "size") return expr_evaluation::make_rvalue(ref.size());
-                    else if (method.name == "capacity") return expr_evaluation::make_rvalue(ref.capacity());
-                    else if (method.name == "empty") return expr_evaluation::make_rvalue(ref.empty());
-                    else if (method.name == "front") return expr_evaluation::make_lvalue(ref.front());
-                    else if (method.name == "back") return expr_evaluation::make_lvalue(ref.back());
+                    if (method.name == "size") return expr_evaluation::make_rvalue<size_t>([&ref](){ return rvalue_ptr(ref.size()); });
+                    else if (method.name == "capacity") return expr_evaluation::make_rvalue<size_t>([&ref](){ return rvalue_ptr(ref.capacity()); });
+                    else if (method.name == "empty") return expr_evaluation::make_rvalue<bool>([&ref](){ return rvalue_ptr(ref.empty()); });
+                    else if (method.name == "front") return expr_evaluation::make_lvalue<T>([&ref](){ return rvalue_ptr(ref.front()); });
+                    else if (method.name == "back") return expr_evaluation::make_lvalue<T>([&ref](){ return rvalue_ptr(ref.back()); });
                     else if (method.name == "pop_back") { ref.pop_back(); return expr_evaluation::make_void(); }
                     else if (method.name == "clear") { ref.clear(); return expr_evaluation::make_void(); }
                 }
@@ -1416,7 +1505,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression cons
         if (std::holds_alternative<expr_operator>(part)) {
             auto &op = std::get<expr_operator>(part).type;
             if (op == "->") {
-                return evaluate_var_member(expr_evaluation::make_lvalue(*ref), expr, part_idx + 1);
+                return evaluate_var_member(expr_evaluation::make_lvalue<T>([ref](){ return ref; /* todo */ }), expr, part_idx + 1);
             }
         }
         else if (std::holds_alternative<expr_brackets>(part)) {
@@ -1433,7 +1522,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression cons
 
 template <class T>
 std::optional<expr_eval_result> expr_eval_typed<T>::evaluate_var_expression(expression const& expr, size_t part_idx) {
-    return evaluate_typed_var_expr(*ptr, expr, part_idx);
+    return evaluate_typed_var_expr(*ptr.get(), expr, part_idx); // todo: defer
 }
 
 inline expr_eval_result evaluate_var_expression(expr_eval_ptr var, expression const& expr, size_t part_idx) {
@@ -1484,19 +1573,19 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_variable>(part)) { // we've got an undefined variable
         auto &var = std::get<expr_variable>(part);
-        return { std::make_unique<expr_eval_undefined_var>(var.name), part_idx + 1 };
+        return { std::make_shared<expr_eval_undefined_var>(var.name), part_idx + 1 };
     }
     else if (std::holds_alternative<expr_constant>(part)) {
         auto cnst = std::get<expr_constant>(part);
         auto create_const = [&](){
             try { // create new rvalue
                 switch(cnst.type) {
-                    case expr_const_type::_int: return expr_evaluation::make_rvalue_from_string<long long>(cnst.value);
+                    case expr_const_type::_int: return expr_evaluation::make_rvalue_from_string<long long>(cnst.value); // todo: these could be created immediately without using deferred callback
                     case expr_const_type::_real: return expr_evaluation::make_rvalue_from_string<double>(cnst.value);
                     case expr_const_type::_bool: return expr_evaluation::make_rvalue_from_string<bool>(cnst.value);
                     case expr_const_type::_char: return expr_evaluation::make_rvalue_from_string<char>(cnst.value);
                     case expr_const_type::_string: return expr_evaluation::make_rvalue_from_string<std::string>(cnst.value);
-                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue(nullptr);
+                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue<std::nullptr_t>([](){ return rvalue_ptr(nullptr); });
                     case expr_const_type::empty: _tunable_check(false); break;
                 }
             }
