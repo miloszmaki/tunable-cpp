@@ -649,11 +649,8 @@ public:
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) = 0;
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) = 0;
 
-    template <class T, int addr_recursion = 0> static expr_eval_ptr make_lvalue(T& ref) { return make_lvalue<T, addr_recursion>(ref, false); }
-    template <class T, int addr_recursion = 0> static expr_eval_ptr make_lvalue(T*& ref) { return make_lvalue<T*, addr_recursion>(ref, true); }
-
-    template <class T, int addr_recursion = 0> static expr_eval_ptr make_rvalue(T const& ref) { return make_rvalue<T, addr_recursion>(ref, false); }
-    template <class T, int addr_recursion = 0> static expr_eval_ptr make_rvalue(T* const& ref) { return make_rvalue<T*, addr_recursion>(ref, true); }
+    template <class T, int addr_recursion = 0> static expr_eval_ptr make_lvalue(T& ref);
+    template <class T, int addr_recursion = 0> static expr_eval_ptr make_rvalue(T const& ref);
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s) {
         T x;
         if (!from_string(x, s)) throw std::runtime_error("deserialization error");
@@ -664,9 +661,6 @@ public:
 
 private:
     bool rvalue = false;
-
-    template <class T, int addr_recursion> static expr_eval_ptr make_lvalue(T& ref, bool is_ptr);
-    template <class T, int addr_recursion> static expr_eval_ptr make_rvalue(T const& ref, bool is_ptr);
 };
 
 
@@ -779,7 +773,7 @@ private:
 template <class T>
 class expr_eval_typed_base : public expr_evaluation {
 public:
-    expr_eval_typed_base(T* ptr, bool owned, bool constant, bool value_is_ptr) : expr_evaluation(constant), ptr(ptr), owned(owned), value_is_ptr(value_is_ptr) {}
+    expr_eval_typed_base(T* ptr, bool owned, bool constant) : expr_evaluation(constant), ptr(ptr), owned(owned) {}
 
     virtual ~expr_eval_typed_base() {
         if (owned && ptr) delete ptr;
@@ -789,7 +783,7 @@ public:
 
     T const& value() const { return *ptr; }
 
-    virtual bool is_ptr() const { return value_is_ptr; }
+    virtual bool is_ptr() const { return std::is_pointer_v<T>; }
 
     virtual std::optional<std::string> to_string() const {
         return stringify(*ptr);
@@ -806,20 +800,20 @@ public:
 
 protected:
     T* ptr = nullptr;
-    bool owned = false, value_is_ptr = false;
+    bool owned = false;
 };
 
 template <class T, int addr_recursion = 0>
 class expr_eval_typed : public expr_eval_typed_base<T> {
 public:
-    expr_eval_typed(T* ptr, bool owned, bool constant, bool value_is_ptr) : expr_eval_typed_base<T>(ptr, owned, constant, value_is_ptr) {}
+    expr_eval_typed(T* ptr, bool owned, bool constant) : expr_eval_typed_base<T>(ptr, owned, constant) {}
 
     virtual ~expr_eval_typed() {}
 
     using expr_eval_typed_base<T>::ptr;
     using expr_eval_typed_base<T>::owned;
-    using expr_eval_typed_base<T>::value_is_ptr;
     using expr_eval_typed_base<T>::value;
+    using expr_eval_typed_base<T>::is_ptr;
     using expr_evaluation::is_rvalue;
 
     virtual expr_eval_ptr create_var(std::string const& name) {
@@ -909,7 +903,7 @@ public:
 
         if (type == "=") {
             if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
-            if (value_is_ptr && rhs->is_ptr())
+            if (is_ptr() && rhs->is_ptr())
                 throw std::runtime_error("implicit casting of pointers of different type");
             auto str = rhs->to_string(); // serialize
             if (!str) throw std::runtime_error("serialization error");
@@ -928,13 +922,13 @@ T const& expr_evaluation::value() const {
 }
 
 template <class T, int addr_recursion>
-expr_eval_ptr expr_evaluation::make_lvalue(T& ref, bool is_ptr) {
-    return std::make_unique<expr_eval_typed<T, addr_recursion>>(&ref, false, false, is_ptr);
+expr_eval_ptr expr_evaluation::make_lvalue(T& ref) {
+    return std::make_unique<expr_eval_typed<T, addr_recursion>>(&ref, false, false);
 }
 
 template <class T, int addr_recursion>
-expr_eval_ptr expr_evaluation::make_rvalue(T const& ref, bool is_ptr) {
-    return std::make_unique<expr_eval_typed<T, addr_recursion>>(new T(ref), true, true, is_ptr);
+expr_eval_ptr expr_evaluation::make_rvalue(T const& ref) {
+    return std::make_unique<expr_eval_typed<T, addr_recursion>>(new T(ref), true, true);
 }
 
 } // expression evaluation
