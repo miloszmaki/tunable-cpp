@@ -380,7 +380,7 @@ struct parsing_exception : public std::exception {
               indent + marker + "\n";
     }
 
-    virtual const char* what() const noexcept { return msg.c_str(); }
+    const char* what() const noexcept override { return msg.c_str(); }
 
 private:
     std::string msg;
@@ -511,7 +511,7 @@ struct expr_eval_exception : public std::exception {
         init(errors.at(error), expr, part_idx);
     }
 
-    virtual const char* what() const noexcept { return msg.c_str(); }
+    const char* what() const noexcept override { return msg.c_str(); }
 
 private:
     std::string msg;
@@ -661,18 +661,18 @@ public:
     expr_eval_undefined_var(std::string name) : expr_evaluation(false), name(name) {}
     virtual ~expr_eval_undefined_var() {}
 
-    virtual std::type_index type() const { return typeid(undefined_type); }
+    std::type_index type() const override { return typeid(undefined_type); }
 
-    virtual bool is_ptr() const { return false; }
-    virtual std::optional<std::string> to_string() const { return "undefined"; }
-    virtual expr_eval_ptr create_var(std::string const& name) { throw std::runtime_error("cannot create variable from undefined"); }
-    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const { return std::nullopt; }
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) { throw std::runtime_error("operator cannot be applied on undefined"); }
-    virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
+    bool is_ptr() const override { return false; }
+    std::optional<std::string> to_string() const override { return "undefined"; }
+    expr_eval_ptr create_var(std::string const& name) override { throw std::runtime_error("cannot create variable from undefined"); }
+    std::optional<expr_eval_ptr> get_member_var(std::string const& name) const override { return std::nullopt; }
+    expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) override { throw std::runtime_error("operator cannot be applied on undefined"); }
+    expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) override {
         if (type != "=") throw std::runtime_error("operator cannot be applied on undefined");
         return rhs->create_var(name);
     }
-    virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) { return std::nullopt; }
+    std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) override { return std::nullopt; }
 
 private:
     std::string name;
@@ -689,13 +689,13 @@ public:
 template <class T, int addr_recursion = 0>
 class addr_of_helper : public addr_of_helper_base {
 public:
-    virtual addr_helper_ptr clone() const {
+    addr_helper_ptr clone() const override {
         return std::make_unique<addr_of_helper<T, addr_recursion>>();
     }
-    virtual addr_helper_ptr clone_deref() const {
+    addr_helper_ptr clone_deref() const override {
         return std::make_unique<addr_of_helper<T, std::max(0, addr_recursion - 1)>>();
     }
-    virtual std::optional<expr_eval_ptr> make_addr_of(void* ptr) const {
+    std::optional<expr_eval_ptr> make_addr_of(void* ptr) const override {
         if constexpr (addr_recursion < max_addr_recursion) {
             return expr_evaluation::make_rvalue<T*>(&(*reinterpret_cast<T*>(ptr)),
                 std::make_unique<addr_of_helper<T, addr_recursion + 1>>());
@@ -814,24 +814,24 @@ public:
         if (owned && ptr) delete ptr;
     }
 
-    virtual std::type_index type() const { return typeid(T); }
+    std::type_index type() const override { return typeid(T); }
 
     T const& value() const { return *ptr; }
 
-    virtual bool is_ptr() const { return std::is_pointer_v<T>; }
+    bool is_ptr() const override { return std::is_pointer_v<T>; }
 
-    virtual std::optional<std::string> to_string() const {
+    std::optional<std::string> to_string() const override {
         return stringify(*ptr);
     }
 
-    virtual expr_eval_ptr create_var(std::string const& name);
+    expr_eval_ptr create_var(std::string const& name) override;
 
-    virtual std::optional<expr_eval_ptr> get_member_var(std::string const& name) const;
+    std::optional<expr_eval_ptr> get_member_var(std::string const& name) const override;
 
-    virtual expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side);
-    virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs);
+    expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) override;
+    expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) override;
 
-    virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx);
+    std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) override;
 
 protected:
     T* ptr = nullptr;
@@ -1051,7 +1051,7 @@ private:
 template <class T>
 class tunable_type : public tunable_type_base {
 public:
-    virtual std::optional<expr_eval_ptr> get_var_eval(std::string const& name) {
+    std::optional<expr_eval_ptr> get_var_eval(std::string const& name) override {
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
         if (!var) return std::nullopt;
@@ -1152,7 +1152,7 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    virtual expr_eval_ptr get_var_eval(T& ref) {
+    expr_eval_ptr get_var_eval(T& ref) override {
         auto& member_ref = get_ref(ref);
         return expr_evaluation::make_lvalue(member_ref,
             addr_of_helper_factory<M>::make_zero_recursion());
@@ -1176,7 +1176,7 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    virtual expr_eval_ptr get_var_eval(T& ref) {
+    expr_eval_ptr get_var_eval(T& ref) override {
         auto& member_ref = get_ref(ref);
         return expr_evaluation::make_rvalue(
             (M* const&)member_ref, addr_of_helper_factory<M*>::make_zero_recursion());
