@@ -684,10 +684,18 @@ class addr_helper_base {
 public:
     const addr_helper_id_t id;
     virtual addr_helper_id_t deref() const = 0;
-    virtual std::optional<expr_eval_ptr> addr_of(void* ptr) const = 0;
+    template <class T>
+    std::optional<expr_eval_ptr> addr_of(T* ptr) const {
+        _tunable_check(is<T>());
+        return _addr_of(static_cast<void*>(ptr));
+    }
 
 protected:
     addr_helper_base(addr_helper_id_t id) : id(id) {}
+
+    template <class T> bool is() const { return type() == std::type_index(typeid(T)); }
+    virtual std::type_index type() const = 0;
+    virtual std::optional<expr_eval_ptr> _addr_of(void* ptr) const = 0;
 };
 
 class addr_helpers {
@@ -717,10 +725,12 @@ template <class T, int addr_recursion = 0>
 class addr_helper : public addr_helper_base {
 public:
     addr_helper_id_t deref() const override;
-    std::optional<expr_eval_ptr> addr_of(void* ptr) const override;
 
 private:
     addr_helper() : addr_helper_base(addr_helpers::add(this)) {}
+
+    std::type_index type() const override { return typeid(T); }
+    std::optional<expr_eval_ptr> _addr_of(void* ptr) const override;
 
     template <class>
     friend class addr_helper_factory;
@@ -747,14 +757,20 @@ struct addr_helper_factory<T[N]> {
 
 template <class T, int addr_recursion>
 addr_helper_id_t addr_helper<T, addr_recursion>::deref() const {
-    return addr_helper_factory<T>::template get<std::max(0, addr_recursion - 1)>();
+    _tunable_check(has_unary_operator_deref<T>::value);
+    if constexpr (has_unary_operator_deref<T>::value) {
+        using TO = typename std::remove_reference_t<decltype(*(*(T*)1))>;
+        return addr_helper_factory<TO>::template get<std::max(0, addr_recursion - 1)>();
+    }
+    return -1;
 }
 
 template <class T, int addr_recursion>
-std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::addr_of(void* ptr) const {
-    if constexpr (addr_recursion < max_addr_recursion) {
+std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::_addr_of(void* ptr) const {
+    _tunable_check(has_unary_operator_addr<T>::value);
+    if constexpr (has_unary_operator_addr<T>::value && addr_recursion < max_addr_recursion) {
         return expr_evaluation::make_rvalue<T*>(&(*static_cast<T*>(ptr)),
-            addr_helper_factory<T>::template get<addr_recursion + 1>());
+            addr_helper_factory<T*>::template get<addr_recursion + 1>());
     }
     return std::nullopt;
 }
@@ -946,7 +962,7 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
     if constexpr (has_unary_operator_addr<T>::value) {
         if (type == "&") {
             if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
-            auto opt_eval = addr_helpers::get(addr_helper_id)->addr_of(static_cast<void*>(ptr));
+            auto opt_eval = addr_helpers::get(addr_helper_id)->addr_of(ptr);
             if (opt_eval) return std::move(*opt_eval);
         }
     }
