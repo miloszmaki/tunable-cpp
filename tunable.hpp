@@ -480,14 +480,13 @@ public:
     virtual ~tunable_base() {}
 };
 
-class addr_of_helper_base;
-using addr_helper_ptr = std::unique_ptr<addr_of_helper_base>;
+using addr_helper_id_t = unsigned int;
 
 // allows to create new tunables
 class tunable_factory {
 public:
     template <class T>
-    static void create(T& ref, std::string const& name, addr_helper_ptr addr_helper);
+    static void create(T& ref, std::string const& name, addr_helper_id_t addr_helper_id);
 private:
     inline static std::vector<tunable_base*> tunables;
 };
@@ -642,8 +641,10 @@ public:
     virtual expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) = 0;
     virtual std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) = 0;
 
-    template <class T> static expr_eval_ptr make_lvalue(T& ref, addr_helper_ptr addr_helper);
-    template <class T> static expr_eval_ptr make_rvalue(T const& ref, addr_helper_ptr addr_helper);
+    template <class T> static expr_eval_ptr make_lvalue(T& ref, addr_helper_id_t addr_helper_id);
+    template <class T> static expr_eval_ptr make_rvalue(T const& ref, addr_helper_id_t addr_helper_id);
+    template <class T> static expr_eval_ptr make_lvalue(T& ref);
+    template <class T> static expr_eval_ptr make_rvalue(T const& ref);
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s);
 
     static expr_eval_ptr make_void() { return {}; }
@@ -679,63 +680,101 @@ private:
 };
 
 // helper for address-of operator
-class addr_of_helper_base {
+class addr_helper_base {
 public:
-    virtual addr_helper_ptr clone() const = 0;
-    virtual addr_helper_ptr clone_deref() const = 0;
-    virtual std::optional<expr_eval_ptr> make_addr_of(void* ptr) const = 0;
+    const addr_helper_id_t id;
+    virtual addr_helper_id_t deref() const = 0;
+    virtual std::optional<expr_eval_ptr> addr_of(void* ptr) const = 0;
+
+protected:
+    addr_helper_base(addr_helper_id_t id) : id(id) {}
+};
+
+class addr_helpers {
+public:
+    static addr_helper_id_t add(addr_helper_base* p_addr_helper) {
+        auto &self = get_instance();
+        self.helpers.emplace_back(p_addr_helper);
+        return self.helpers.size() - 1;
+    }
+    static addr_helper_base* get(addr_helper_id_t id) {
+        auto &self = get_instance();
+        _tunable_check(id < self.helpers.size());
+        return self.helpers[id];
+    }
+private:
+    addr_helpers() {}
+
+    static addr_helpers& get_instance() {
+        static addr_helpers instance;
+        return instance;
+    }
+
+    std::vector<addr_helper_base*> helpers;
 };
 
 template <class T, int addr_recursion = 0>
-class addr_of_helper : public addr_of_helper_base {
+class addr_helper : public addr_helper_base {
 public:
-    addr_helper_ptr clone() const override {
-        return std::make_unique<addr_of_helper<T, addr_recursion>>();
-    }
-    addr_helper_ptr clone_deref() const override {
-        return std::make_unique<addr_of_helper<T, std::max(0, addr_recursion - 1)>>();
-    }
-    std::optional<expr_eval_ptr> make_addr_of(void* ptr) const override {
-        if constexpr (addr_recursion < max_addr_recursion) {
-            return expr_evaluation::make_rvalue<T*>(&(*reinterpret_cast<T*>(ptr)),
-                std::make_unique<addr_of_helper<T, addr_recursion + 1>>());
-        }
-        return std::nullopt;
-    }
+    addr_helper_id_t deref() const override;
+    std::optional<expr_eval_ptr> addr_of(void* ptr) const override;
+
+private:
+    addr_helper() : addr_helper_base(addr_helpers::add(this)) {}
+
+    template <class>
+    friend class addr_helper_factory;
 };
 
 template <class T>
-struct addr_of_helper_factory {
-    static addr_helper_ptr make_zero_recursion() {
-        return std::make_unique<addr_of_helper<T>>();
+struct addr_helper_factory {
+    template <int addr_recursion = 0>
+    static addr_helper_id_t get() {
+        static addr_helper<T, addr_recursion> instance;
+        return instance.id;
     }
 };
 
 // array support
 template <class T, size_t N>
-struct addr_of_helper_factory<T[N]> {
-    static addr_helper_ptr make_zero_recursion() {
-        return std::make_unique<addr_of_helper<T*>>();
+struct addr_helper_factory<T[N]> {
+    template <int addr_recursion = 0>
+    static addr_helper_id_t get() {
+        static addr_helper<T*, addr_recursion> instance;
+        return instance.id;
     }
 };
+
+template <class T, int addr_recursion>
+addr_helper_id_t addr_helper<T, addr_recursion>::deref() const {
+    return addr_helper_factory<T>::template get<std::max(0, addr_recursion - 1)>();
+}
+
+template <class T, int addr_recursion>
+std::optional<expr_eval_ptr> addr_helper<T, addr_recursion>::addr_of(void* ptr) const {
+    if constexpr (addr_recursion < max_addr_recursion) {
+        return expr_evaluation::make_rvalue<T*>(&(*static_cast<T*>(ptr)),
+            addr_helper_factory<T>::template get<addr_recursion + 1>());
+    }
+    return std::nullopt;
+}
 
 // evaluation of binary operator for arbitrary types
 template <class TL, class TR>
 std::optional<expr_eval_ptr> apply_binary_op(std::string const& op_type, TL& lhs, TR const& rhs, bool lhs_is_rvalue,
-                                             addr_of_helper_base* lhs_addr_helper) {
+                                             addr_helper_id_t lhs_addr_helper_id) {
 #define _tunable_apply_binary_op(op, name) \
     if constexpr (has_binary_operator_##name<TL,TR>::value) { \
         if (op_type == #op) { \
             using _TO = decltype(lhs op rhs); \
             using TO = typename std::remove_reference_t<_TO>; \
-            addr_helper_ptr op_addr_recursion; \
-            if constexpr (std::is_same_v<TO, TL>) op_addr_recursion = lhs_addr_helper->clone(); \
-            else op_addr_recursion = addr_of_helper_factory<TO>::make_zero_recursion(); \
+            auto op_addr_helper_id = lhs_addr_helper_id; \
+            if constexpr (!std::is_same_v<TO, TL>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if constexpr (std::is_lvalue_reference_v<_TO>) { \
                 if (lhs_is_rvalue) throw std::runtime_error("can't modify an rvalue"); \
-                return expr_evaluation::make_lvalue<TO>(lhs op rhs, std::move(op_addr_recursion)); \
+                return expr_evaluation::make_lvalue<TO>(lhs op rhs, op_addr_helper_id); \
             } \
-            else return expr_evaluation::make_rvalue<TO>((TL const&)lhs op rhs, std::move(op_addr_recursion)); \
+            else return expr_evaluation::make_rvalue<TO>((TL const&)lhs op rhs, op_addr_helper_id); \
         } \
     }
 
@@ -787,8 +826,7 @@ public:
         if (op_funcs.count(type)) return;
 
         op_funcs[type] = [](std::string const& op_type, TL& lhs, expr_eval_ptr const& rhs, bool lhs_is_rvalue) {
-            auto lhs_addr_helper = addr_of_helper_factory<TL>::make_zero_recursion();
-            return apply_binary_op<TL,TR>(op_type, lhs, rhs->value<TR>(), lhs_is_rvalue, lhs_addr_helper.get());
+            return apply_binary_op<TL,TR>(op_type, lhs, rhs->value<TR>(), lhs_is_rvalue, addr_helper_factory<TL>::get());
         };
     }
 
@@ -807,8 +845,8 @@ private:
 template <class T>
 class expr_eval_typed : public expr_evaluation {
 public:
-    expr_eval_typed(T* ptr, bool owned, bool constant, addr_helper_ptr addr_helper)
-        : expr_evaluation(constant), ptr(ptr), owned(owned), addr_helper(std::move(addr_helper)) {}
+    expr_eval_typed(T* ptr, bool owned, bool constant, addr_helper_id_t addr_helper_id)
+        : expr_evaluation(constant), ptr(ptr), owned(owned), addr_helper_id(addr_helper_id) {}
 
     virtual ~expr_eval_typed() {
         if (owned && ptr) delete ptr;
@@ -836,7 +874,7 @@ public:
 protected:
     T* ptr = nullptr;
     bool owned = false;
-    addr_helper_ptr addr_helper;
+    const addr_helper_id_t addr_helper_id;
 };
 
 template <class T>
@@ -850,8 +888,8 @@ expr_eval_ptr expr_eval_typed<T>::create_var(std::string const& name) {
         ptr2 = new T(value());
     }
     T& ref2 = *ptr2;
-    tunable_factory::create<T>(ref2, name, addr_helper->clone());
-    return expr_evaluation::make_lvalue<T>(ref2, addr_helper->clone());
+    tunable_factory::create<T>(ref2, name, addr_helper_id);
+    return expr_evaluation::make_lvalue<T>(ref2, addr_helper_id);
 }
 
 template <class T>
@@ -861,11 +899,10 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
         if (type == #op) { \
             using _TO = decltype((*ptr)op); \
             using TO = typename std::remove_reference_t<_TO>; \
-            addr_helper_ptr op_addr_recursion; \
-            if constexpr (std::is_same_v<TO, T>) op_addr_recursion = addr_helper->clone(); \
-            else op_addr_recursion = addr_of_helper_factory<TO>::make_zero_recursion(); \
+            auto op_addr_helper_id = addr_helper_id; \
+            if constexpr (!std::is_same_v<TO, T>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
-            return expr_evaluation::make_rvalue<TO>((*ptr)op, std::move(op_addr_recursion)); \
+            return expr_evaluation::make_rvalue<TO>((*ptr)op, op_addr_helper_id); \
         } \
     }
 
@@ -874,14 +911,13 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
         if (type == #op) { \
             using _TO = decltype(op(*ptr)); \
             using TO = typename std::remove_reference_t<_TO>; \
-            addr_helper_ptr op_addr_recursion; \
-            if constexpr (std::is_same_v<TO, T>) op_addr_recursion = addr_helper->clone(); \
-            else op_addr_recursion = addr_of_helper_factory<TO>::make_zero_recursion(); \
+            auto op_addr_helper_id = addr_helper_id; \
+            if constexpr (!std::is_same_v<TO, T>) op_addr_helper_id = addr_helper_factory<TO>::get(); \
             if constexpr (std::is_lvalue_reference_v<_TO>) { \
                 if (is_rvalue()) throw std::runtime_error("can't modify an rvalue"); \
-                return expr_evaluation::make_lvalue<TO>(op(*ptr), std::move(op_addr_recursion)); \
+                return expr_evaluation::make_lvalue<TO>(op(*ptr), op_addr_helper_id); \
             } \
-            else return expr_evaluation::make_rvalue<TO>(op(*ptr), std::move(op_addr_recursion)); \
+            else return expr_evaluation::make_rvalue<TO>(op(*ptr), op_addr_helper_id); \
         } \
     }
 
@@ -903,14 +939,14 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
         using TO = typename std::remove_reference_t<decltype(*(*ptr))>;
         if (type == "*") {
             if (*ptr == nullptr) throw std::runtime_error("can't dereference null pointer");
-            return expr_evaluation::make_lvalue<TO>(*(*ptr), addr_helper->clone_deref());
+            return expr_evaluation::make_lvalue<TO>(*(*ptr), addr_helpers::get(addr_helper_id)->deref());
         }
     }
 
     if constexpr (has_unary_operator_addr<T>::value) {
         if (type == "&") {
             if (is_rvalue()) throw std::runtime_error("can't apply on an rvalue");
-            auto opt_eval = addr_helper->make_addr_of(ptr);
+            auto opt_eval = addr_helpers::get(addr_helper_id)->addr_of(static_cast<void*>(ptr));
             if (opt_eval) return std::move(*opt_eval);
         }
     }
@@ -924,7 +960,7 @@ expr_eval_ptr expr_eval_typed<T>::apply_unary_operator(std::string const& type, 
 template <class T>
 expr_eval_ptr expr_eval_typed<T>::apply_binary_operator(std::string const& type, expr_eval_ptr rhs) {
     if (rhs->is<T>()) {
-        auto eval = apply_binary_op<T,T>(type, *ptr, rhs->value<T>(), is_rvalue(), addr_helper.get());
+        auto eval = apply_binary_op<T,T>(type, *ptr, rhs->value<T>(), is_rvalue(), addr_helper_id);
         if (!eval) throw std::runtime_error("no operator for these operands");
         return std::move(*eval);
     }
@@ -940,7 +976,7 @@ expr_eval_ptr expr_eval_typed<T>::apply_binary_operator(std::string const& type,
         if (!str) throw std::runtime_error("serialization error");
         // deserialize
         if (!from_string(*ptr, *str)) throw std::runtime_error("deserialization error");
-        return expr_evaluation::make_lvalue<T>(*ptr, addr_helper->clone());
+        return expr_evaluation::make_lvalue<T>(*ptr, addr_helper_id);
     }
 
     throw std::runtime_error("no operator for these operands");
@@ -948,24 +984,34 @@ expr_eval_ptr expr_eval_typed<T>::apply_binary_operator(std::string const& type,
 
 template <class T>
 T const& expr_evaluation::value() const {
-    return reinterpret_cast<expr_eval_typed<T> const*>(this)->value();
+    return static_cast<expr_eval_typed<T> const*>(this)->value();
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_lvalue(T& ref, addr_helper_ptr addr_helper) {
-    return std::make_unique<expr_eval_typed<T>>(&ref, false, false, std::move(addr_helper));
+expr_eval_ptr expr_evaluation::make_lvalue(T& ref, addr_helper_id_t addr_helper_id) {
+    return std::make_unique<expr_eval_typed<T>>(&ref, false, false, addr_helper_id);
 }
 
 template <class T>
-expr_eval_ptr expr_evaluation::make_rvalue(T const& ref, addr_helper_ptr addr_helper) {
-    return std::make_unique<expr_eval_typed<T>>(new T(ref), true, true, std::move(addr_helper));
+expr_eval_ptr expr_evaluation::make_rvalue(T const& ref, addr_helper_id_t addr_helper_id) {
+    return std::make_unique<expr_eval_typed<T>>(new T(ref), true, true, addr_helper_id);
+}
+
+template <class T>
+expr_eval_ptr expr_evaluation::make_lvalue(T& ref) {
+    return make_lvalue(ref, addr_helper_factory<T>::get());
+}
+
+template <class T>
+expr_eval_ptr expr_evaluation::make_rvalue(T const& ref) {
+    return make_rvalue(ref, addr_helper_factory<T>::get());
 }
 
 template <class T>
 expr_eval_ptr expr_evaluation::make_rvalue_from_string(std::string const& s) {
     T x;
     if (!from_string(x, s)) throw std::runtime_error("deserialization error");
-    return make_rvalue(x, addr_of_helper_factory<T>::make_zero_recursion());
+    return make_rvalue(x);
 }
 
 // holds a reference to a tunable variable
@@ -973,19 +1019,17 @@ template <class T>
 class tunable : public tunable_base {
 public:
     T& ref;
-    tunable(T &var, std::string const& name, addr_helper_ptr addr_helper)
-            : ref(var), name(name), addr_helper(std::move(addr_helper)) {
+    const addr_helper_id_t addr_helper_id;
+
+    tunable(T &var, std::string const& name, addr_helper_id_t addr_helper_id)
+            : ref(var), name(name), addr_helper_id(addr_helper_id) {
         add_to_type(name);
     }
     virtual ~tunable() {
         remove_from_type(name);
     }
-    addr_helper_ptr get_addr_helper() const {
-        return addr_helper->clone();
-    }
 private:
     std::string name;
-    addr_helper_ptr addr_helper;
 
     void add_to_type(std::string const& name);
     void remove_from_type(std::string const& name);
@@ -995,16 +1039,16 @@ private:
 template <class T, size_t N>
 class tunable<T[N]> {
 public:
-    tunable(T* var, std::string const& name, addr_helper_ptr addr_helper)
-        : ptr(var), t(ptr, name, std::move(addr_helper)) {}
+    tunable(T* var, std::string const& name, addr_helper_id_t addr_helper_id)
+        : ptr(var), t(ptr, name, addr_helper_id) {}
 private:
     T* ptr; // needed to get the reference
     tunable<T*> t;
 };
 
 template <class T>
-void tunable_factory::create(T& ref, std::string const& name, addr_helper_ptr addr_helper) {
-    tunables.emplace_back(new tunable<T>(ref, name, std::move(addr_helper)));
+void tunable_factory::create(T& ref, std::string const& name, addr_helper_id_t addr_helper_id) {
+    tunables.emplace_back(new tunable<T>(ref, name, addr_helper_id));
 }
 
 // interface for variable search and assignment
@@ -1055,7 +1099,7 @@ public:
         auto &self = get_instance();
         auto var = self.find_var_typed(name);
         if (!var) return std::nullopt;
-        return expr_evaluation::make_lvalue<T>(var->ref, std::move(var->get_addr_helper()));
+        return expr_evaluation::make_lvalue<T>(var->ref, var->addr_helper_id);
     }
 private:
     std::map<std::string, tunable<T>*> vars;
@@ -1154,8 +1198,7 @@ public:
     }
     expr_eval_ptr get_var_eval(T& ref) override {
         auto& member_ref = get_ref(ref);
-        return expr_evaluation::make_lvalue(member_ref,
-            addr_of_helper_factory<M>::make_zero_recursion());
+        return expr_evaluation::make_lvalue(member_ref);
     }
 private:
     std::string name;
@@ -1178,8 +1221,7 @@ public:
     }
     expr_eval_ptr get_var_eval(T& ref) override {
         auto& member_ref = get_ref(ref);
-        return expr_evaluation::make_rvalue(
-            (M* const&)member_ref, addr_of_helper_factory<M*>::make_zero_recursion());
+        return expr_evaluation::make_rvalue((M* const&)member_ref);
     }
 private:
     std::string name;
@@ -1275,13 +1317,12 @@ template <class T>
 expr_eval_ptr evaluate_subscript(T& ref, size_t size, expression const& expr) {
     auto idx_eval = evaluate_expression(expr);
     if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
-    using elem_type = std::remove_reference_t<decltype((*(T*)1)[0])>;
     auto str = idx_eval->to_string();
     if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
     size_t idx = -1;
     if (!is_integer(*str) || !from_string(idx, *str)) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
     if (idx >= size) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
-    return expr_evaluation::make_lvalue(ref[idx], addr_of_helper_factory<elem_type>::make_zero_recursion());
+    return expr_evaluation::make_lvalue(ref[idx]);
 }
 
 template <class T>
@@ -1328,11 +1369,11 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                     }
                 }
                 else { // method without arguments
-                    if (method.name == "size") return expr_evaluation::make_rvalue(ref.size(), addr_of_helper_factory<size_t>::make_zero_recursion());
-                    else if (method.name == "capacity") return expr_evaluation::make_rvalue(ref.capacity(), addr_of_helper_factory<size_t>::make_zero_recursion());
-                    else if (method.name == "empty") return expr_evaluation::make_rvalue(ref.empty(), addr_of_helper_factory<bool>::make_zero_recursion());
-                    else if (method.name == "front") return expr_evaluation::make_lvalue(ref.front(), addr_of_helper_factory<T>::make_zero_recursion());
-                    else if (method.name == "back") return expr_evaluation::make_lvalue(ref.back(), addr_of_helper_factory<T>::make_zero_recursion());
+                    if (method.name == "size") return expr_evaluation::make_rvalue(ref.size());
+                    else if (method.name == "capacity") return expr_evaluation::make_rvalue(ref.capacity());
+                    else if (method.name == "empty") return expr_evaluation::make_rvalue(ref.empty());
+                    else if (method.name == "front") return expr_evaluation::make_lvalue(ref.front());
+                    else if (method.name == "back") return expr_evaluation::make_lvalue(ref.back());
                     else if (method.name == "pop_back") { ref.pop_back(); return expr_evaluation::make_void(); }
                     else if (method.name == "clear") { ref.clear(); return expr_evaluation::make_void(); }
                 }
@@ -1359,7 +1400,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression cons
         if (std::holds_alternative<expr_operator>(part)) {
             auto &op = std::get<expr_operator>(part).type;
             if (op == "->") {
-                return evaluate_var_member(expr_evaluation::make_lvalue(*ref, addr_of_helper_factory<T>::make_zero_recursion()), expr, part_idx + 1);
+                return evaluate_var_member(expr_evaluation::make_lvalue(*ref), expr, part_idx + 1);
             }
         }
         else if (std::holds_alternative<expr_brackets>(part)) {
@@ -1439,7 +1480,7 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
                     case expr_const_type::_bool: return expr_evaluation::make_rvalue_from_string<bool>(cnst.value);
                     case expr_const_type::_char: return expr_evaluation::make_rvalue_from_string<char>(cnst.value);
                     case expr_const_type::_string: return expr_evaluation::make_rvalue_from_string<std::string>(cnst.value);
-                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue(nullptr, addr_of_helper_factory<std::nullptr_t>::make_zero_recursion());
+                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue(nullptr);
                     case expr_const_type::empty: _tunable_check(false); break;
                 }
             }
@@ -1724,7 +1765,7 @@ inline void run_interaction_loop() {
 // tunable_member(Class,x) - register member variable Class::x as tunable
 #define tunable_member(Class,x) _tunable_member(Class, _tunable_var_type(Class::x), x)
 
-#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x, _tunable_impl::addr_of_helper_factory<T>::make_zero_recursion())
+#define _tunable_var_(T,x,n) _tunable_impl::tunable _tunable_for_##n(x, #x, _tunable_impl::addr_helper_factory<T>::get())
 #define _tunable_var(x,n) _tunable_var_(_tunable_var_type(x), x, n)
 // tunable_var(x) - capture variable x as tunable
 #define tunable_var(x) _tunable_var(x, _tunable_uniqid)
