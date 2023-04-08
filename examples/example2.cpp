@@ -7,6 +7,10 @@ struct Point {
     double y{0.};
 };
 
+Point operator+(Point const& p1, Point const &p2) {
+    return {p1.x+p2.x, p1.y+p2.y};
+}
+
 ostream& operator<<(ostream& stream, const Point& p) { return stream << "{" << p.x << "," << p.y << "}"; }
 istream& operator>>(istream& stream, Point& p) { char c; return stream >> p.x >> c >> p.y; }
 
@@ -60,6 +64,8 @@ $ c.radius*=1.5
 7.5
 $ p2.y = p2.x - p1.y
 1.6
+$ p3=p1+p2
+{1.1,-0.4}
 $ ;q
 --- TUNABLE END ---
 p1: {1.5,-2}
