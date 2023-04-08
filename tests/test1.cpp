@@ -63,11 +63,14 @@ void runTests() {
     TEST("x+0.4*y", "6.2");
     CHECK(x, 3);
 
-    tunable_eval("p=&x");
-    TEST("*p", "3");
-    TEST("++*p", "4");
-    TEST("x", "4");
-    CHECK(x, 4);
+    if constexpr (_tunable_impl::max_addr_recursion) {
+        tunable_eval("p=&x");
+        TEST("*p", "3");
+        TEST("++*p", "4");
+        TEST("x", "4");
+        CHECK(x, 4);
+    }
+    else x = 4;
 
     TEST("x++y", "Expression evaluation error: invalid syntax\nx++y\n ^^");
     TEST("x++--", "Expression evaluation error: can't modify an rvalue\nx++--\n   ^^");
