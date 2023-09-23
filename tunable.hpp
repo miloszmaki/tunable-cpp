@@ -1408,17 +1408,19 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T& ref, expression const
 }
 
 template <class T>
-expr_eval_ptr evaluate_subscript(T& ref, size_t size, expression const& expr) {
+expr_eval_ptr evaluate_subscript(T& ref, expression const& expr) {
     auto idx_eval = evaluate_expression(expr);
     if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
     using elem_type = std::remove_reference_t<decltype((*(T*)1)[0])>;
-    return expr_evaluation::make_lvalue<elem_type>([&ref, idx_eval, size, &expr](){ // todo: size might change before deferred evaluation ?
+    return expr_evaluation::make_lvalue<elem_type>([&ref, idx_eval, &expr](){
         auto str = idx_eval->to_string();
         if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
         size_t idx = -1;
         if (!is_integer(*str) || !from_string(idx, *str))
             throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
-        if (idx >= size) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
+        if constexpr (!std::is_pointer_v<T>) {
+            if (idx >= ref.size()) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
+        }
         return lvalue_ptr(ref[idx]);
     });
 }
@@ -1429,7 +1431,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
     if (std::holds_alternative<expr_brackets>(part)) {
         auto &brackets = std::get<expr_brackets>(part);
         if (brackets.type == '[' && brackets.nested) {
-            auto eval = evaluate_subscript(ref, ref.size(), *brackets.nested);
+            auto eval = evaluate_subscript(ref, *brackets.nested);
             return expr_eval_result{std::move(eval), part_idx + 1};
         }
     }
@@ -1511,8 +1513,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression cons
         else if (std::holds_alternative<expr_brackets>(part)) {
             auto &brackets = std::get<expr_brackets>(part);
             if (brackets.type == '[' && brackets.nested) {
-                size_t unknown_size = -1;
-                auto eval = evaluate_subscript(ref, unknown_size, *brackets.nested);
+                auto eval = evaluate_subscript(ref, *brackets.nested);
                 return expr_eval_result{std::move(eval), part_idx + 1};
             }
         }
