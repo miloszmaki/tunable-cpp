@@ -1415,21 +1415,22 @@ inline expr_eval_result evaluate_var_member(expr_eval_ptr var, expression const 
 }
 
 template <class T>
-std::optional<expr_eval_result> evaluate_typed_var_expr(T& ref, expression const& expr, size_t part_idx) {
+std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eval_typed<T>> ptr, expression const& expr, size_t part_idx) {
     return std::nullopt;
 }
 
 template <class T>
-expr_eval_ptr evaluate_subscript(T& ref, expression const& expr) {
+expr_eval_ptr evaluate_subscript(std::shared_ptr<expr_eval_typed<T>> ptr, expression const& expr) {
     auto idx_eval = evaluate_expression(expr);
     if (!idx_eval) throw expr_eval_exception(expr_eval_error::void_to_value, expr, 0);
     using elem_type = std::remove_reference_t<decltype((*(T*)1)[0])>;
-    return expr_evaluation::make_lvalue<elem_type>([&ref, idx_eval, &expr](){
+    return expr_evaluation::make_lvalue<elem_type>([ptr = std::move(ptr), idx_eval, &expr](){
         auto str = idx_eval->to_string();
         if (!str) throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
         size_t idx = -1;
         if (!is_integer(*str) || !from_string(idx, *str))
             throw expr_eval_exception(expr_eval_error::invalid_syntax, expr, 0);
+        auto& ref = ptr->value();
         if constexpr (!std::is_pointer_v<T>) {
             if (idx >= ref.size()) throw expr_eval_exception(expr_eval_error::idx_out_of_bounds, expr, 0);
         }
@@ -1438,12 +1439,12 @@ expr_eval_ptr evaluate_subscript(T& ref, expression const& expr) {
 }
 
 template <class T>
-std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, expression const& expr, size_t part_idx) {
+std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eval_typed<std::vector<T>>> ptr, expression const& expr, size_t part_idx) {
     auto &part = expr.parts[part_idx];
     if (std::holds_alternative<expr_brackets>(part)) {
         auto &brackets = std::get<expr_brackets>(part);
         if (brackets.type == '[' && brackets.nested) {
-            auto eval = evaluate_subscript(ref, *brackets.nested);
+            auto eval = evaluate_subscript(std::move(ptr), *brackets.nested);
             return expr_eval_result{std::move(eval), part_idx + 1};
         }
     }
@@ -1457,10 +1458,12 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                         auto eval = evaluate_expression(*args.nested);
                         if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                         if (eval->is<T>()) {
+                            auto &ref = ptr->value(); // todo: defer
                             ref.push_back(eval->value<T>());
                             return expr_evaluation::make_void();
                         }
                         else { // implicit type conversion
+                            auto &ref = ptr->value(); // todo: defer
                             auto assignment = binary_operators<T>::call("=",
                                     expr_evaluation::make_lvalue<T>([&ref](){
                                         ref.emplace_back();
@@ -1481,6 +1484,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                         if (s && is_integer(*s)) {
                             size_t size;
                             from_string(size, *s);
+                            auto &ref = ptr->value(); // todo: defer
                             ref.resize(size);
                             return expr_evaluation::make_void();
                         }
@@ -1488,13 +1492,13 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
                     }
                 }
                 else { // method without arguments
-                    if (method.name == "size") return expr_evaluation::make_rvalue<size_t>([&ref](){ return rvalue_ptr(ref.size()); });
-                    else if (method.name == "capacity") return expr_evaluation::make_rvalue<size_t>([&ref](){ return rvalue_ptr(ref.capacity()); });
-                    else if (method.name == "empty") return expr_evaluation::make_rvalue<bool>([&ref](){ return rvalue_ptr(ref.empty()); });
-                    else if (method.name == "front") return expr_evaluation::make_lvalue<T>([&ref](){ return rvalue_ptr(ref.front()); });
-                    else if (method.name == "back") return expr_evaluation::make_lvalue<T>([&ref](){ return rvalue_ptr(ref.back()); });
-                    else if (method.name == "pop_back") { ref.pop_back(); return expr_evaluation::make_void(); }
-                    else if (method.name == "clear") { ref.clear(); return expr_evaluation::make_void(); }
+                    if (method.name == "size") return expr_evaluation::make_rvalue<size_t>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().size()); });
+                    else if (method.name == "capacity") return expr_evaluation::make_rvalue<size_t>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().capacity()); });
+                    else if (method.name == "empty") return expr_evaluation::make_rvalue<bool>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().empty()); });
+                    else if (method.name == "front") return expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().front()); });
+                    else if (method.name == "back") return expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().back()); });
+                    else if (method.name == "pop_back") { ptr->value().pop_back(); return expr_evaluation::make_void(); } // todo: defer
+                    else if (method.name == "clear") { ptr->value().clear(); return expr_evaluation::make_void(); } // todo: defer
                 }
                 return std::nullopt;
             };
@@ -1513,21 +1517,23 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::vector<T>& ref, exp
 }
 
 template <class T>
-std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression const& expr, size_t part_idx) {
+std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eval_typed<T*>> ptr, expression const& expr, size_t part_idx) {
+    auto &part = expr.parts[part_idx];
     if constexpr (!std::is_pointer_v<T>) {
-        auto &part = expr.parts[part_idx];
         if (std::holds_alternative<expr_operator>(part)) {
             auto &op = std::get<expr_operator>(part).type;
             if (op == "->") {
-                return evaluate_var_member(expr_evaluation::make_lvalue<T>([ref](){ return ref; /* todo */ }), expr, part_idx + 1);
+                return evaluate_var_member(
+                    expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){ return ptr->value(); }),
+                    expr, part_idx + 1);
             }
         }
-        else if (std::holds_alternative<expr_brackets>(part)) {
-            auto &brackets = std::get<expr_brackets>(part);
-            if (brackets.type == '[' && brackets.nested) {
-                auto eval = evaluate_subscript(ref, *brackets.nested);
-                return expr_eval_result{std::move(eval), part_idx + 1};
-            }
+    }
+    if (std::holds_alternative<expr_brackets>(part)) {
+        auto &brackets = std::get<expr_brackets>(part);
+        if (brackets.type == '[' && brackets.nested) {
+            auto eval = evaluate_subscript(std::move(ptr), *brackets.nested);
+            return expr_eval_result{std::move(eval), part_idx + 1};
         }
     }
     return std::nullopt;
@@ -1535,7 +1541,7 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(T*& ref, expression cons
 
 template <class T>
 std::optional<expr_eval_result> expr_eval_typed<T>::evaluate_var_expression(expression const& expr, size_t part_idx) {
-    return evaluate_typed_var_expr(*ptr.get(), expr, part_idx); // todo: defer
+    return evaluate_typed_var_expr(std::static_pointer_cast<expr_eval_typed<T>>(shared_from_this()), expr, part_idx);
 }
 
 inline expr_eval_result evaluate_var_expression(expr_eval_ptr var, expression const& expr, size_t part_idx) {
