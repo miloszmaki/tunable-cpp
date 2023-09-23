@@ -940,18 +940,17 @@ protected:
 template <class T>
 expr_eval_ptr expr_eval_typed<T>::create_var(std::string const& name) {
     return expr_evaluation::make_lvalue<T>(
-        [shared_this = shared_from_this(), name](){
-            auto *typed_this = static_cast<expr_eval_typed<T>*>(shared_this.get());
+        [shared_this = std::static_pointer_cast<expr_eval_typed<T>>(shared_from_this()), name](){
             T* ptr2 = nullptr;
-            if (typed_this->owned) { // move
-                ptr2 = typed_this->ptr.get();
-                typed_this->owned = false; // prevent deletion
+            if (shared_this->owned) { // move
+                ptr2 = shared_this->ptr.get();
+                shared_this->owned = false; // prevent deletion
             }
             else { // copy
-                ptr2 = new T(typed_this->value());
+                ptr2 = new T(shared_this->value());
             }
             T& ref2 = *ptr2;
-            tunable_factory::create<T>(ref2, name, typed_this->addr_helper_id);
+            tunable_factory::create<T>(ref2, name, shared_this->addr_helper_id);
             return lvalue_ptr(ref2);
         }, addr_helper_id);
 }
