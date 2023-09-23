@@ -621,6 +621,7 @@ inline std::vector<operator_context> compute_precedence(expression const& expr) 
 template <class T>
 class deferred_ptr {
 public:
+    deferred_ptr(T* ptr) : ptr(ptr), evaluated(true) {}
     deferred_ptr(std::function<T*()> make_ptr) : make_ptr(make_ptr) {}
     T* get() {
         evaluate();
@@ -670,8 +671,10 @@ public:
 
     template <class T> static expr_eval_ptr make_lvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id);
     template <class T> static expr_eval_ptr make_rvalue(std::function<T*()> make_ptr, addr_helper_id_t addr_helper_id);
+    template <class T> static expr_eval_ptr make_rvalue(T* ptr, addr_helper_id_t addr_helper_id);
     template <class T> static expr_eval_ptr make_lvalue(std::function<T*()> make_ptr);
     template <class T> static expr_eval_ptr make_rvalue(std::function<T*()> make_ptr);
+    template <class T> static expr_eval_ptr make_rvalue(T* ptr);
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s);
 
     static expr_eval_ptr make_void() { return {}; }
@@ -900,6 +903,8 @@ private:
 template <class T>
 class expr_eval_typed : public expr_evaluation {
 public:
+    expr_eval_typed(T* ptr, bool owned, bool constant, addr_helper_id_t addr_helper_id)
+        : expr_evaluation(constant), ptr(ptr), owned(owned), addr_helper_id(addr_helper_id) {}
     expr_eval_typed(std::function<T*()> make_ptr, bool owned, bool constant, addr_helper_id_t addr_helper_id)
         : expr_evaluation(constant), ptr(make_ptr), owned(owned), addr_helper_id(addr_helper_id) {}
 
@@ -1081,6 +1086,11 @@ expr_eval_ptr expr_evaluation::make_rvalue(std::function<T*()> make_ptr, addr_he
 }
 
 template <class T>
+expr_eval_ptr expr_evaluation::make_rvalue(T* ptr, addr_helper_id_t addr_helper_id) {
+    return std::make_shared<expr_eval_typed<T>>(ptr, true, true, addr_helper_id);
+}
+
+template <class T>
 expr_eval_ptr expr_evaluation::make_lvalue(std::function<T*()> make_ptr) {
     return make_lvalue(std::move(make_ptr), addr_helper_factory<T>::get());
 }
@@ -1091,12 +1101,15 @@ expr_eval_ptr expr_evaluation::make_rvalue(std::function<T*()> make_ptr) {
 }
 
 template <class T>
+expr_eval_ptr expr_evaluation::make_rvalue(T* ptr) {
+    return make_rvalue(ptr, addr_helper_factory<T>::get());
+}
+
+template <class T>
 expr_eval_ptr expr_evaluation::make_rvalue_from_string(std::string const& s) {
-    return make_rvalue<T>([s](){
-        T* x = new T;
-        if (!from_string(*x, s)) throw std::runtime_error("deserialization error");
-        return x;
-    });
+    auto x = std::make_unique<T>();
+    if (!from_string(*x, s)) throw std::runtime_error("deserialization error");
+    return make_rvalue<T>(x.release());
 }
 
 // holds a reference to a tunable variable
@@ -1581,12 +1594,12 @@ inline expr_eval_result evaluate_value_expression(expression const& expr, size_t
         auto create_const = [&](){
             try { // create new rvalue
                 switch(cnst.type) {
-                    case expr_const_type::_int: return expr_evaluation::make_rvalue_from_string<long long>(cnst.value); // todo: these could be created immediately without using deferred callback
+                    case expr_const_type::_int: return expr_evaluation::make_rvalue_from_string<long long>(cnst.value);
                     case expr_const_type::_real: return expr_evaluation::make_rvalue_from_string<double>(cnst.value);
                     case expr_const_type::_bool: return expr_evaluation::make_rvalue_from_string<bool>(cnst.value);
                     case expr_const_type::_char: return expr_evaluation::make_rvalue_from_string<char>(cnst.value);
                     case expr_const_type::_string: return expr_evaluation::make_rvalue_from_string<std::string>(cnst.value);
-                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue<std::nullptr_t>([](){ return rvalue_ptr(nullptr); });
+                    case expr_const_type::_nullptr: return expr_evaluation::make_rvalue(rvalue_ptr<std::nullptr_t>(nullptr));
                     case expr_const_type::empty: _tunable_check(false); break;
                 }
             }
