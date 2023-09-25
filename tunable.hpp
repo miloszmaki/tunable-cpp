@@ -1281,7 +1281,7 @@ template <class T>
 class member_var_base_typed : public member_var_base {
 public:
     virtual ~member_var_base_typed() {}
-    virtual expr_eval_ptr get_var_eval(T& ref) = 0;
+    virtual expr_eval_ptr get_var_eval(std::shared_ptr<expr_eval_typed<T>> ptr) = 0;
 };
 
 // holds all tunable members for a given class
@@ -1324,10 +1324,11 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    expr_eval_ptr get_var_eval(T& ref) override {
-         // todo: here probably we'll pass something different than T&
-        auto& member_ref = get_ref(ref);
-        return expr_evaluation::make_lvalue<M>([&member_ref](){ return lvalue_ptr(member_ref); });
+    expr_eval_ptr get_var_eval(std::shared_ptr<expr_eval_typed<T>> ptr) override {
+        return expr_evaluation::make_lvalue<M>([this, ptr = std::move(ptr)](){
+            auto& member_ref = get_ref(ptr->value());
+            return lvalue_ptr(member_ref);
+        });
     }
 private:
     std::string name;
@@ -1348,10 +1349,10 @@ public:
     virtual ~member_var() {
         member_vars<T>::remove(name);
     }
-    expr_eval_ptr get_var_eval(T& ref) override {
-        auto& member_ref = get_ref(ref);
-        auto arr_ptr = (M* const&)member_ref;
-        return expr_evaluation::make_rvalue<M*>([arr_ptr](){
+    expr_eval_ptr get_var_eval(std::shared_ptr<expr_eval_typed<T>> ptr) override {
+        return expr_evaluation::make_rvalue<M*>([this, ptr = std::move(ptr)](){
+            auto& member_ref = get_ref(ptr->value());
+            auto arr_ptr = (M* const&)member_ref;
             return rvalue_ptr(arr_ptr);
         });
     }
@@ -1423,7 +1424,7 @@ template <class T>
 std::optional<expr_eval_ptr> expr_eval_typed<T>::get_member_var(std::string const& name) {
     auto var = member_vars<T>::find_member(name);
     if (!var) return std::nullopt;
-    auto var_eval = var->get_var_eval(*ptr.get()); // todo: defer
+    auto var_eval = var->get_var_eval(std::static_pointer_cast<expr_eval_typed<T>>(shared_from_this()));
     _tunable_check(var_eval != nullptr);
     return var_eval;
 }
