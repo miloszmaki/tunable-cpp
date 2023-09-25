@@ -677,7 +677,7 @@ public:
     template <class T> static expr_eval_ptr make_rvalue(T* ptr);
     template <class T> static expr_eval_ptr make_rvalue_from_string(std::string const& s);
 
-    static expr_eval_ptr make_void() { return {}; }
+    static inline expr_eval_ptr make_void(std::function<void()> func);
 
 private:
     bool rvalue = false;
@@ -710,6 +710,28 @@ public:
 
 private:
     std::string name;
+};
+
+// void result of some function
+class expr_eval_void : public expr_evaluation {
+public:
+    expr_eval_void(std::function<void()> func) : expr_evaluation(true), func(func) {}
+    virtual ~expr_eval_void() {}
+
+    std::type_index type() const override { return typeid(void); }
+
+    bool is_ptr() const override { return false; }
+    std::optional<std::string> to_string() override { evaluate(); return std::nullopt; }
+    expr_eval_ptr create_var(std::string const& name) override { throw std::runtime_error("cannot create variable from void"); }
+    std::optional<expr_eval_ptr> get_member_var(std::string const& name) override { return std::nullopt; }
+    expr_eval_ptr apply_unary_operator(std::string const& type, operator_side side) override { throw std::runtime_error("operator cannot be applied on void"); }
+    expr_eval_ptr apply_binary_operator(std::string const& type, expr_eval_ptr rhs) override { throw std::runtime_error("operator cannot be applied on void"); }
+    std::optional<expr_eval_result> evaluate_var_expression(expression const& expr, size_t part_idx) override { return std::nullopt; }
+
+private:
+    std::function<void()> func;
+    bool evaluated = false;
+    void evaluate() { if (!evaluated) { func(); evaluated = true; } }
 };
 
 // helper for address-of operator
@@ -1111,6 +1133,10 @@ expr_eval_ptr expr_evaluation::make_rvalue_from_string(std::string const& s) {
     return make_rvalue<T>(x.release());
 }
 
+inline expr_eval_ptr expr_evaluation::make_void(std::function<void()> func) {
+    return std::make_shared<expr_eval_void>(std::move(func));
+}
+
 // holds a reference to a tunable variable
 template <class T>
 class tunable : public tunable_base {
@@ -1458,21 +1484,21 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eva
                         auto eval = evaluate_expression(*args.nested);
                         if (!eval) throw expr_eval_exception(expr_eval_error::void_to_value, *args.nested, 0);
                         if (eval->is<T>()) {
-                            auto &ref = ptr->value(); // todo: defer
-                            ref.push_back(eval->value<T>());
-                            return expr_evaluation::make_void();
+                            return expr_evaluation::make_void([ptr = std::move(ptr), eval = std::move(eval)](){
+                                ptr->value().push_back(eval->value<T>());
+                            });
                         }
                         else { // implicit type conversion
-                            auto &ref = ptr->value(); // todo: defer
                             auto assignment = binary_operators<T>::call("=",
-                                    expr_evaluation::make_lvalue<T>([&ref](){
+                                    expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){
+                                        auto &ref = ptr->value();
                                         ref.emplace_back();
                                         return lvalue_ptr(ref.back());
                                     }), eval);
                             if (assignment.has_value()) {
-                                expr_eval_ptr& assign_eval = *assignment;
-                                auto assigned = assign_eval->value<T>(); // evaluate
-                                return expr_evaluation::make_void();
+                                return expr_evaluation::make_void([assignment = std::move(assignment)](){
+                                    (*assignment)->template value<T>(); // evaluate
+                                });
                             }
                         }
                         throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
@@ -1483,10 +1509,11 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eva
                         auto s = eval->to_string();
                         if (s && is_integer(*s)) {
                             size_t size;
-                            from_string(size, *s);
-                            auto &ref = ptr->value(); // todo: defer
-                            ref.resize(size);
-                            return expr_evaluation::make_void();
+                            if (from_string(size, *s)) {
+                                return expr_evaluation::make_void([ptr = std::move(ptr), size](){
+                                    ptr->value().resize(size);
+                                });
+                            }
                         }
                         throw expr_eval_exception(expr_eval_error::invalid_syntax, *args.nested, 0);
                     }
@@ -1497,8 +1524,8 @@ std::optional<expr_eval_result> evaluate_typed_var_expr(std::shared_ptr<expr_eva
                     else if (method.name == "empty") return expr_evaluation::make_rvalue<bool>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().empty()); });
                     else if (method.name == "front") return expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().front()); });
                     else if (method.name == "back") return expr_evaluation::make_lvalue<T>([ptr = std::move(ptr)](){ return rvalue_ptr(ptr->value().back()); });
-                    else if (method.name == "pop_back") { ptr->value().pop_back(); return expr_evaluation::make_void(); } // todo: defer
-                    else if (method.name == "clear") { ptr->value().clear(); return expr_evaluation::make_void(); } // todo: defer
+                    else if (method.name == "pop_back") { return expr_evaluation::make_void([ptr = std::move(ptr)](){ ptr->value().pop_back(); }); }
+                    else if (method.name == "clear") { return expr_evaluation::make_void([ptr = std::move(ptr)](){ ptr->value().clear(); }); }
                 }
                 return std::nullopt;
             };
